@@ -4,6 +4,7 @@
 // See LICENSE for details.
 
 import Testing
+import Network
 import TraversioMoshTransport
 
 struct MoshInMemoryDatagramLinkTests {
@@ -80,6 +81,34 @@ struct MoshInMemoryDatagramLinkTests {
         try await link.start()
 
         await link.stop()
+        await link.stop()
+
+        await #expect(
+            throws: MoshDatagramTransportError.stopped
+        ) {
+            try await link.start()
+        }
+    }
+
+    @Test
+    func nwLinkSendBeforeStartFailsAtSenderBoundary() async throws {
+        let link = MoshNWDatagramLink(
+            endpoint: .hostPort(host: "127.0.0.1", port: 1)
+        )
+
+        await #expect(
+            throws: MoshDatagramTransportError.notStarted
+        ) {
+            try await link.send([0x01])
+        }
+    }
+
+    @Test
+    func nwLinkStopPreventsStart() async throws {
+        let link = MoshNWDatagramLink(
+            endpoint: .hostPort(host: "127.0.0.1", port: 1)
+        )
+
         await link.stop()
 
         await #expect(
