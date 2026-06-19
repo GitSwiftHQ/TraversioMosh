@@ -162,6 +162,13 @@ public struct MoshTerminalStateEngine: Sendable {
         try self.hostState.applyMoshDiff(diff)
         return Array(self.hostState.operations.dropFirst(beforeCount))
     }
+
+    @discardableResult
+    public mutating func acceptHostState(_ hostState: MoshTerminalHostState) -> [MoshHostOperation] {
+        let operations = hostState.operations.removingPrefix(self.hostState.operations) ?? hostState.operations
+        self.hostState = hostState
+        return operations
+    }
 }
 
 private extension Array where Element: Equatable {
