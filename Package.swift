@@ -39,10 +39,18 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "TraversioMoshCZlib",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedLibrary("z")
+            ]
+        ),
+        .target(
             name: "TraversioMoshCrypto"
         ),
         .target(
-            name: "TraversioMoshWire"
+            name: "TraversioMoshWire",
+            dependencies: ["TraversioMoshCZlib"]
         ),
         .target(
             name: "TraversioMoshTransport"
