@@ -18,6 +18,46 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func autoWrapModeWrapsOnNextPrintableAfterRightMargin() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abc", "X  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
+    func disabledAutoWrapModeOverwritesRightMargin() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ab\u{1b}[?7lXYZ".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abZ", "   "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func reenabledAutoWrapModeRestoresDeferredWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ab\u{1b}[?7lX\u{1b}[?7hYZ".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abY", "Z  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
+    func resetRestoresAutoWrapMode() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?7labc\u{1b}cabcX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abc", "X  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func appliesCarriageReturnLineFeedBackspaceAndTab() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 2))
 

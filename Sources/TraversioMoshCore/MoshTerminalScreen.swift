@@ -110,6 +110,7 @@ public struct MoshTerminalScreen: Sendable {
     private var wrapPending: Bool
     private var tabStops: Set<Int>
     private var originMode: Bool
+    private var autoWrapMode: Bool
 
     public init(dimensions: MoshTerminalDimensions) {
         self.dimensions = dimensions
@@ -125,6 +126,7 @@ public struct MoshTerminalScreen: Sendable {
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(dimensions.columns))
         self.originMode = false
+        self.autoWrapMode = true
     }
 
     public var snapshot: MoshTerminalScreenSnapshot {
@@ -262,11 +264,15 @@ public struct MoshTerminalScreen: Sendable {
             self.wrapPending = false
         }
 
-        let displayWidth = min(scalarWidth.rawValue, self.maximumColumn + 1)
+        var displayWidth = min(scalarWidth.rawValue, self.maximumColumn + 1)
         if displayWidth > self.availableColumnsFromCursor {
-            self.index()
-            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
-            self.wrapPending = false
+            if self.autoWrapMode {
+                self.index()
+                self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
+                self.wrapPending = false
+            } else {
+                displayWidth = self.availableColumnsFromCursor
+            }
         }
 
         self.clearCellForWrite(row: self.cursor.row, column: self.cursor.column)
@@ -285,7 +291,7 @@ public struct MoshTerminalScreen: Sendable {
         let lastColumn = self.cursor.column + displayWidth - 1
         if lastColumn == self.maximumColumn {
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: self.maximumColumn)
-            self.wrapPending = true
+            self.wrapPending = self.autoWrapMode
         } else {
             self.cursor = MoshTerminalCursor(
                 row: self.cursor.row,
@@ -536,6 +542,11 @@ public struct MoshTerminalScreen: Sendable {
         case 6:
             self.originMode = enabled
             self.homeCursor()
+        case 7:
+            self.autoWrapMode = enabled
+            if enabled == false {
+                self.wrapPending = false
+            }
         case 47, 1047:
             if enabled {
                 self.activateAlternateScreen(clear: false, saveCursor: false)
@@ -798,6 +809,7 @@ public struct MoshTerminalScreen: Sendable {
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(self.dimensions.columns))
         self.originMode = false
+        self.autoWrapMode = true
     }
 
     private mutating func moveCursor(rowDelta: Int, columnDelta: Int) {
