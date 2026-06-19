@@ -139,6 +139,66 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func decSpecialGraphicsG0MapsLineDrawingCharacters() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}(0lqk\u{1b}(Babc".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["┌─┐abc  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 6))
+    }
+
+    @Test
+    func decSpecialGraphicsMapsCompleteVT100Range() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 32, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}(0_`abcdefghijklmnopqrstuvwxyz{|}~".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["▮◆▒␉␌␍␊°±␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥π≠£·"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 31))
+    }
+
+    @Test
+    func shiftOutUsesG1AndShiftInRestoresG0() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 7, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b})0A\u{0e}xq\u{0f}xq".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A│─xq  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 5))
+    }
+
+    @Test
+    func designatingG0DoesNotOverrideActiveG1Selection() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b})0\u{0e}\u{1b}(Bq\u{0f}q".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["─q "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func saveRestoreCursorPreservesCharacterSetState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}(0\u{1b}7\u{1b}(Bq\u{1b}8q".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A─ "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func resetRestoresASCIICharacterSetDesignation() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}(0\u{1b}cq".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["q "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
     func appliesCarriageReturnLineFeedBackspaceAndTab() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 2))
 

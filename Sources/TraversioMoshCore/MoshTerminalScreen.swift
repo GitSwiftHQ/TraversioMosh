@@ -117,6 +117,9 @@ public struct MoshTerminalScreen: Sendable {
     private var autoWrapMode: Bool
     private var insertMode: Bool
     private var isCursorVisible: Bool
+    private var g0CharacterSet: MoshTerminalCharacterSet
+    private var g1CharacterSet: MoshTerminalCharacterSet
+    private var activeCharacterSetSlot: MoshTerminalCharacterSetSlot
 
     public init(dimensions: MoshTerminalDimensions) {
         self.dimensions = dimensions
@@ -136,6 +139,9 @@ public struct MoshTerminalScreen: Sendable {
         self.autoWrapMode = true
         self.insertMode = false
         self.isCursorVisible = true
+        self.g0CharacterSet = .usASCII
+        self.g1CharacterSet = .usASCII
+        self.activeCharacterSetSlot = .g0
     }
 
     public var snapshot: MoshTerminalScreenSnapshot {
@@ -242,8 +248,15 @@ public struct MoshTerminalScreen: Sendable {
             self.escapeState = .escape
         case .delete:
             break
-        case .c0:
-            break
+        case .c0(let byte):
+            switch byte {
+            case 0x0e:
+                self.activeCharacterSetSlot = .g1
+            case 0x0f:
+                self.activeCharacterSetSlot = .g0
+            default:
+                break
+            }
         case .c1(let byte):
             switch byte {
             case 0x84:
@@ -271,7 +284,8 @@ public struct MoshTerminalScreen: Sendable {
         }
     }
 
-    private mutating func place(_ scalar: Unicode.Scalar) {
+    private mutating func place(_ rawScalar: Unicode.Scalar) {
+        let scalar = self.activeCharacterSet.map(rawScalar)
         let scalarWidth = MoshTerminalCharacterWidth.width(of: scalar)
         if scalarWidth == .zero {
             self.appendZeroWidthScalar(scalar)
@@ -584,7 +598,10 @@ public struct MoshTerminalScreen: Sendable {
             cursor: self.cursor,
             attributes: self.currentAttributes,
             wrapPending: self.wrapPending,
-            originMode: self.originMode
+            originMode: self.originMode,
+            g0CharacterSet: self.g0CharacterSet,
+            g1CharacterSet: self.g1CharacterSet,
+            activeCharacterSetSlot: self.activeCharacterSetSlot
         )
     }
 
@@ -599,6 +616,9 @@ public struct MoshTerminalScreen: Sendable {
         self.currentAttributes = savedCursorState.attributes
         self.wrapPending = savedCursorState.wrapPending
         self.originMode = savedCursorState.originMode
+        self.g0CharacterSet = savedCursorState.g0CharacterSet
+        self.g1CharacterSet = savedCursorState.g1CharacterSet
+        self.activeCharacterSetSlot = savedCursorState.activeCharacterSetSlot
     }
 
     private var activeSavedCursorState: MoshTerminalSavedCursorState? {
@@ -728,6 +748,10 @@ public struct MoshTerminalScreen: Sendable {
         switch (state, token) {
         case (.escape, .scalar("[")):
             self.escapeState = .csi(CSIState())
+        case (.escape, .scalar("(")):
+            self.escapeState = .characterSetDesignation(.g0)
+        case (.escape, .scalar(")")):
+            self.escapeState = .characterSetDesignation(.g1)
         case (.escape, .scalar("P")):
             self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
         case (.escape, .scalar("X")):
@@ -779,8 +803,40 @@ public struct MoshTerminalScreen: Sendable {
             self.escapeState = .escape
         case (.csi, _):
             break
+        case (.characterSetDesignation(let slot), .scalar(let scalar)):
+            self.designateCharacterSet(slot: slot, final: scalar)
+            self.escapeState = nil
+        case (.characterSetDesignation, .control(.escape)):
+            self.escapeState = .escape
+        case (.characterSetDesignation, _):
+            self.escapeState = nil
         case (.stringControl(let stringState), _):
             self.consumeStringControl(token: token, state: stringState)
+        }
+    }
+
+    private var activeCharacterSet: MoshTerminalCharacterSet {
+        switch self.activeCharacterSetSlot {
+        case .g0:
+            return self.g0CharacterSet
+        case .g1:
+            return self.g1CharacterSet
+        }
+    }
+
+    private mutating func designateCharacterSet(
+        slot: MoshTerminalCharacterSetSlot,
+        final scalar: Unicode.Scalar
+    ) {
+        guard let characterSet = MoshTerminalCharacterSet(designationFinal: scalar) else {
+            return
+        }
+
+        switch slot {
+        case .g0:
+            self.g0CharacterSet = characterSet
+        case .g1:
+            self.g1CharacterSet = characterSet
         }
     }
 
@@ -978,6 +1034,9 @@ public struct MoshTerminalScreen: Sendable {
         self.autoWrapMode = true
         self.insertMode = false
         self.isCursorVisible = true
+        self.g0CharacterSet = .usASCII
+        self.g1CharacterSet = .usASCII
+        self.activeCharacterSetSlot = .g0
     }
 
     private mutating func moveCursor(rowDelta: Int, columnDelta: Int) {
@@ -1342,7 +1401,116 @@ public struct MoshTerminalScreen: Sendable {
 private enum EscapeState: Equatable, Sendable {
     case escape
     case csi(CSIState)
+    case characterSetDesignation(MoshTerminalCharacterSetSlot)
     case stringControl(StringControlState)
+}
+
+private enum MoshTerminalCharacterSetSlot: Equatable, Sendable {
+    case g0
+    case g1
+}
+
+private enum MoshTerminalCharacterSet: Equatable, Sendable {
+    case usASCII
+    case decSpecialGraphics
+
+    init?(designationFinal scalar: Unicode.Scalar) {
+        switch scalar {
+        case "0":
+            self = .decSpecialGraphics
+        case "B":
+            self = .usASCII
+        default:
+            return nil
+        }
+    }
+
+    func map(_ scalar: Unicode.Scalar) -> Unicode.Scalar {
+        switch self {
+        case .usASCII:
+            return scalar
+        case .decSpecialGraphics:
+            return Self.decSpecialGraphicsScalar(for: scalar)
+        }
+    }
+
+    private static func decSpecialGraphicsScalar(for scalar: Unicode.Scalar) -> Unicode.Scalar {
+        switch scalar.value {
+        case 0x5f:
+            return Self.scalar(0x25ae)
+        case 0x60:
+            return Self.scalar(0x25c6)
+        case 0x61:
+            return Self.scalar(0x2592)
+        case 0x62:
+            return Self.scalar(0x2409)
+        case 0x63:
+            return Self.scalar(0x240c)
+        case 0x64:
+            return Self.scalar(0x240d)
+        case 0x65:
+            return Self.scalar(0x240a)
+        case 0x66:
+            return Self.scalar(0x00b0)
+        case 0x67:
+            return Self.scalar(0x00b1)
+        case 0x68:
+            return Self.scalar(0x2424)
+        case 0x69:
+            return Self.scalar(0x240b)
+        case 0x6a:
+            return Self.scalar(0x2518)
+        case 0x6b:
+            return Self.scalar(0x2510)
+        case 0x6c:
+            return Self.scalar(0x250c)
+        case 0x6d:
+            return Self.scalar(0x2514)
+        case 0x6e:
+            return Self.scalar(0x253c)
+        case 0x6f:
+            return Self.scalar(0x23ba)
+        case 0x70:
+            return Self.scalar(0x23bb)
+        case 0x71:
+            return Self.scalar(0x2500)
+        case 0x72:
+            return Self.scalar(0x23bc)
+        case 0x73:
+            return Self.scalar(0x23bd)
+        case 0x74:
+            return Self.scalar(0x251c)
+        case 0x75:
+            return Self.scalar(0x2524)
+        case 0x76:
+            return Self.scalar(0x2534)
+        case 0x77:
+            return Self.scalar(0x252c)
+        case 0x78:
+            return Self.scalar(0x2502)
+        case 0x79:
+            return Self.scalar(0x2264)
+        case 0x7a:
+            return Self.scalar(0x2265)
+        case 0x7b:
+            return Self.scalar(0x03c0)
+        case 0x7c:
+            return Self.scalar(0x2260)
+        case 0x7d:
+            return Self.scalar(0x00a3)
+        case 0x7e:
+            return Self.scalar(0x00b7)
+        default:
+            return scalar
+        }
+    }
+
+    private static func scalar(_ value: UInt32) -> Unicode.Scalar {
+        guard let scalar = Unicode.Scalar(value) else {
+            preconditionFailure("Invalid Unicode scalar in DEC Special Graphics mapping")
+        }
+        return scalar
+    }
 }
 
 private struct CSIState: Equatable, Sendable {
@@ -1427,13 +1595,19 @@ private struct MoshTerminalSavedCursorState: Equatable, Sendable {
         cursor: MoshTerminalCursor(row: 0, column: 0),
         attributes: .default,
         wrapPending: false,
-        originMode: false
+        originMode: false,
+        g0CharacterSet: .usASCII,
+        g1CharacterSet: .usASCII,
+        activeCharacterSetSlot: .g0
     )
 
     var cursor: MoshTerminalCursor
     var attributes: MoshTerminalTextAttributes
     var wrapPending: Bool
     var originMode: Bool
+    var g0CharacterSet: MoshTerminalCharacterSet
+    var g1CharacterSet: MoshTerminalCharacterSet
+    var activeCharacterSetSlot: MoshTerminalCharacterSetSlot
 
     func clamped(
         maximumRow: Int,
@@ -1447,7 +1621,10 @@ private struct MoshTerminalSavedCursorState: Equatable, Sendable {
             ),
             attributes: self.attributes,
             wrapPending: self.wrapPending,
-            originMode: self.originMode
+            originMode: self.originMode,
+            g0CharacterSet: self.g0CharacterSet,
+            g1CharacterSet: self.g1CharacterSet,
+            activeCharacterSetSlot: self.activeCharacterSetSlot
         )
     }
 }
