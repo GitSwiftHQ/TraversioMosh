@@ -97,8 +97,20 @@ public struct MoshSSPInMemoryLoop<State: MoshSynchronizedState>: Sendable {
         self.scheduler.sender.knownAcknowledgedStateNumber
     }
 
+    public var shutdownAcknowledged: Bool {
+        self.scheduler.shutdownAcknowledged
+    }
+
     public mutating func setCurrentState(_ state: State, nowMilliseconds: UInt64) {
         self.scheduler.setCurrentState(state, nowMilliseconds: nowMilliseconds)
+    }
+
+    public mutating func startShutdown(nowMilliseconds: UInt64) {
+        self.scheduler.startShutdown(nowMilliseconds: nowMilliseconds)
+    }
+
+    public func shutdownTimedOut(nowMilliseconds: UInt64) -> Bool {
+        self.scheduler.shutdownTimedOut(nowMilliseconds: nowMilliseconds)
     }
 
     public mutating func waitTime(nowMilliseconds: UInt64) throws -> UInt64? {

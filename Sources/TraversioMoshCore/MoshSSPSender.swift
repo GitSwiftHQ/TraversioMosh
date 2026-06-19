@@ -64,6 +64,10 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
         self.sentStates[self.sentStates.count - 1].number
     }
 
+    public var shutdownAcknowledged: Bool {
+        self.sentStates[0].number == UInt64.max
+    }
+
     public var lastSentAtMilliseconds: UInt64 {
         self.sentStates[self.sentStates.count - 1].sentAtMilliseconds
     }
@@ -97,7 +101,8 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
 
     public mutating func makeAcknowledgementInstruction(
         nowMilliseconds: UInt64,
-        timeoutMilliseconds: UInt64
+        timeoutMilliseconds: UInt64,
+        isShutdown: Bool = false
     ) throws -> MoshTransportInstruction {
         try self.updateAssumedReceiverState(
             nowMilliseconds: nowMilliseconds,
@@ -105,11 +110,11 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
         )
 
         let lastNumber = self.sentStates[self.sentStates.count - 1].number
-        guard lastNumber < UInt64.max else {
+        guard isShutdown || lastNumber < UInt64.max else {
             throw MoshSSPError.stateNumberOverflow
         }
 
-        let newNumber = lastNumber + 1
+        let newNumber = isShutdown ? UInt64.max : lastNumber + 1
         let assumedReceiverState = self.sentStates[self.assumedReceiverIndex]
         self.addSentState(
             MoshSentState(
@@ -132,7 +137,8 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
 
     public mutating func makeDataInstruction(
         nowMilliseconds: UInt64,
-        timeoutMilliseconds: UInt64
+        timeoutMilliseconds: UInt64,
+        isShutdown: Bool = false
     ) throws -> MoshTransportInstruction? {
         try self.updateAssumedReceiverState(
             nowMilliseconds: nowMilliseconds,
@@ -148,7 +154,20 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
         }
 
         let newNumber: UInt64
-        if self.currentState == self.sentStates[self.sentStates.count - 1].state {
+        if isShutdown {
+            newNumber = UInt64.max
+            if newNumber == self.sentStates[self.sentStates.count - 1].number {
+                self.sentStates[self.sentStates.count - 1].sentAtMilliseconds = nowMilliseconds
+            } else {
+                self.addSentState(
+                    MoshSentState(
+                        number: newNumber,
+                        sentAtMilliseconds: nowMilliseconds,
+                        state: self.currentState
+                    )
+                )
+            }
+        } else if self.currentState == self.sentStates[self.sentStates.count - 1].state {
             newNumber = self.sentStates[self.sentStates.count - 1].number
             self.sentStates[self.sentStates.count - 1].sentAtMilliseconds = nowMilliseconds
         } else {

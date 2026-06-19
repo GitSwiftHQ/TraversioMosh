@@ -110,6 +110,42 @@ struct MoshSSPInMemoryLoopTests {
         #expect(result.acknowledgementNumber == 0)
         #expect(result.latestState == MoshNumberedState(number: 0, state: ByteState()))
     }
+
+    @Test
+    func shutdownAcknowledgementPrunesSenderThroughMaximumState() throws {
+        var client = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            chaffSource: .none
+        )
+        var server = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            chaffSource: .none
+        )
+
+        client.startShutdown(nowMilliseconds: 0)
+        let shutdownBatch = try #require(try client.tick(nowMilliseconds: 20))
+
+        #expect(shutdownBatch.instruction.newNumber == UInt64.max)
+
+        let serverResult = try deliver(shutdownBatch.packets, to: &server, nowMilliseconds: 21)
+
+        #expect(serverResult.receiveResult == .accepted(newNumber: UInt64.max))
+        #expect(server.acknowledgementNumber == UInt64.max)
+
+        let serverAcknowledgement = try #require(try server.tick(nowMilliseconds: 21))
+
+        #expect(serverAcknowledgement.instruction.acknowledgementNumber == UInt64.max)
+
+        _ = try deliver(serverAcknowledgement.packets, to: &client, nowMilliseconds: 22)
+
+        #expect(client.knownAcknowledgedSendStateNumber == UInt64.max)
+        #expect(client.shutdownAcknowledged)
+        #expect(client.shutdownTimedOut(nowMilliseconds: 10_000) == false)
+    }
 }
 
 private func deliver<Packets: Sequence>(

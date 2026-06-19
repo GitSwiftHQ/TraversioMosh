@@ -133,6 +133,87 @@ struct MoshSSPSendSchedulerTests {
 
         #expect(try scheduler.tick(nowMilliseconds: 200) == nil)
     }
+
+    @Test
+    func shutdownSendsMaximumStateNumberAtSendInterval() throws {
+        var scheduler = MoshSSPSendScheduler(
+            initialState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            chaffSource: .none
+        )
+
+        scheduler.startShutdown(nowMilliseconds: 0)
+
+        #expect(scheduler.shutdownInProgress)
+        #expect(try scheduler.waitTime(nowMilliseconds: 0) == 20)
+        #expect(try scheduler.tick(nowMilliseconds: 19) == nil)
+
+        let instruction = try requireAcknowledgement(try scheduler.tick(nowMilliseconds: 20))
+
+        #expect(instruction.newNumber == UInt64.max)
+        #expect(instruction.diff == [])
+        #expect(scheduler.shutdownAttemptCount == 1)
+        #expect(scheduler.shutdownTimedOut(nowMilliseconds: 20) == false)
+    }
+
+    @Test
+    func shutdownWithPendingDataSendsDataAtMaximumStateNumber() throws {
+        var scheduler = MoshSSPSendScheduler(
+            initialState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            chaffSource: .none
+        )
+
+        scheduler.setCurrentState(ByteState([1, 2, 3]), nowMilliseconds: 0)
+        scheduler.startShutdown(nowMilliseconds: 0)
+
+        let instruction = try requireData(try scheduler.tick(nowMilliseconds: 20))
+
+        #expect(instruction.oldNumber == 0)
+        #expect(instruction.newNumber == UInt64.max)
+        #expect(instruction.diff == [1, 2, 3])
+        #expect(scheduler.shutdownAttemptCount == 1)
+    }
+
+    @Test
+    func shutdownTimesOutAfterMaximumAttempts() throws {
+        var scheduler = MoshSSPSendScheduler(
+            initialState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(
+                sendIntervalMilliseconds: 20,
+                activeRetryTimeoutMilliseconds: 10_000,
+                shutdownMaximumAttempts: 2
+            ),
+            chaffSource: .none
+        )
+
+        scheduler.startShutdown(nowMilliseconds: 0)
+
+        _ = try scheduler.tick(nowMilliseconds: 20)
+        #expect(scheduler.shutdownTimedOut(nowMilliseconds: 20) == false)
+
+        _ = try scheduler.tick(nowMilliseconds: 40)
+
+        #expect(scheduler.shutdownAttemptCount == 2)
+        #expect(scheduler.shutdownTimedOut(nowMilliseconds: 40))
+    }
+
+    @Test
+    func shutdownTimesOutAfterActiveRetryWindow() throws {
+        var scheduler = MoshSSPSendScheduler(
+            initialState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(
+                sendIntervalMilliseconds: 20,
+                activeRetryTimeoutMilliseconds: 100
+            ),
+            chaffSource: .none
+        )
+
+        scheduler.startShutdown(nowMilliseconds: 10)
+
+        #expect(scheduler.shutdownTimedOut(nowMilliseconds: 109) == false)
+        #expect(scheduler.shutdownTimedOut(nowMilliseconds: 110))
+    }
 }
 
 private func requireData(

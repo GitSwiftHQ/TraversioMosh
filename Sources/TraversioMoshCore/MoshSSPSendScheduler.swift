@@ -11,19 +11,22 @@ public struct MoshSSPSendTimingConfiguration: Equatable, Sendable {
     public var activeRetryTimeoutMilliseconds: UInt64
     public var sendMinimumDelayMilliseconds: UInt64
     public var timeoutMilliseconds: UInt64
+    public var shutdownMaximumAttempts: Int
 
     public init(
         sendIntervalMilliseconds: UInt64 = 20,
         acknowledgementIntervalMilliseconds: UInt64 = 3_000,
         activeRetryTimeoutMilliseconds: UInt64 = 10_000,
         sendMinimumDelayMilliseconds: UInt64 = 8,
-        timeoutMilliseconds: UInt64 = 1_000
+        timeoutMilliseconds: UInt64 = 1_000,
+        shutdownMaximumAttempts: Int = 16
     ) {
         self.sendIntervalMilliseconds = sendIntervalMilliseconds
         self.acknowledgementIntervalMilliseconds = acknowledgementIntervalMilliseconds
         self.activeRetryTimeoutMilliseconds = activeRetryTimeoutMilliseconds
         self.sendMinimumDelayMilliseconds = sendMinimumDelayMilliseconds
         self.timeoutMilliseconds = timeoutMilliseconds
+        self.shutdownMaximumAttempts = shutdownMaximumAttempts
     }
 }
 
@@ -41,6 +44,8 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     private var firstPendingChangeAtMilliseconds: UInt64?
     private var lastHeardAtMilliseconds: UInt64?
     private var pendingDataAcknowledgement: Bool
+    private var shutdownStartedAtMilliseconds: UInt64?
+    private var shutdownAttemptCountStorage: Int
 
     public init(
         initialState: State,
@@ -62,6 +67,46 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         self.firstPendingChangeAtMilliseconds = nil
         self.lastHeardAtMilliseconds = nil
         self.pendingDataAcknowledgement = false
+        self.shutdownStartedAtMilliseconds = nil
+        self.shutdownAttemptCountStorage = 0
+    }
+
+    public var shutdownInProgress: Bool {
+        self.shutdownStartedAtMilliseconds != nil
+    }
+
+    public var shutdownAcknowledged: Bool {
+        self.sender.shutdownAcknowledged
+    }
+
+    public var shutdownAttemptCount: Int {
+        self.shutdownAttemptCountStorage
+    }
+
+    public mutating func startShutdown(nowMilliseconds: UInt64) {
+        guard self.shutdownStartedAtMilliseconds == nil else {
+            return
+        }
+        self.shutdownStartedAtMilliseconds = nowMilliseconds
+        self.nextAcknowledgementAtMilliseconds = min(
+            self.nextAcknowledgementAtMilliseconds,
+            Self.saturatingAdd(self.sender.lastSentAtMilliseconds, self.timing.sendIntervalMilliseconds)
+        )
+    }
+
+    public func shutdownTimedOut(nowMilliseconds: UInt64) -> Bool {
+        guard let shutdownStartedAtMilliseconds, self.shutdownAcknowledged == false else {
+            return false
+        }
+
+        if self.shutdownAttemptCountStorage >= self.timing.shutdownMaximumAttempts {
+            return true
+        }
+
+        guard nowMilliseconds >= shutdownStartedAtMilliseconds else {
+            return false
+        }
+        return nowMilliseconds - shutdownStartedAtMilliseconds >= self.timing.activeRetryTimeoutMilliseconds
     }
 
     public mutating func setCurrentState(_ state: State, nowMilliseconds: UInt64) {
@@ -118,18 +163,20 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
 
         if let instruction = try self.sender.makeDataInstruction(
             nowMilliseconds: nowMilliseconds,
-            timeoutMilliseconds: self.timing.timeoutMilliseconds
+            timeoutMilliseconds: self.timing.timeoutMilliseconds,
+            isShutdown: self.shutdownInProgress
         ) {
-            self.recordInstructionSent(nowMilliseconds: nowMilliseconds)
+            self.recordInstructionSent(instruction, nowMilliseconds: nowMilliseconds)
             return .data(instruction)
         }
 
         if acknowledgementDue {
             let instruction = try self.sender.makeAcknowledgementInstruction(
                 nowMilliseconds: nowMilliseconds,
-                timeoutMilliseconds: self.timing.timeoutMilliseconds
+                timeoutMilliseconds: self.timing.timeoutMilliseconds,
+                isShutdown: self.shutdownInProgress
             )
-            self.recordInstructionSent(nowMilliseconds: nowMilliseconds)
+            self.recordInstructionSent(instruction, nowMilliseconds: nowMilliseconds)
             return .acknowledgement(instruction)
         }
 
@@ -146,6 +193,13 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
 
         if self.pendingDataAcknowledgement {
             self.scheduleDelayedAcknowledgement(from: nowMilliseconds)
+        }
+
+        if self.shutdownInProgress || self.sender.acknowledgementNumber == UInt64.max {
+            self.nextAcknowledgementAtMilliseconds = Self.saturatingAdd(
+                self.sender.lastSentAtMilliseconds,
+                self.timing.sendIntervalMilliseconds
+            )
         }
 
         if self.sender.currentStateMatchesLastSentState == false {
@@ -194,7 +248,13 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         self.nextSendAtMilliseconds = nil
     }
 
-    private mutating func recordInstructionSent(nowMilliseconds: UInt64) {
+    private mutating func recordInstructionSent(
+        _ instruction: MoshTransportInstruction,
+        nowMilliseconds: UInt64
+    ) {
+        if instruction.newNumber == UInt64.max {
+            self.shutdownAttemptCountStorage += 1
+        }
         self.nextAcknowledgementAtMilliseconds = Self.saturatingAdd(
             nowMilliseconds,
             self.timing.acknowledgementIntervalMilliseconds
