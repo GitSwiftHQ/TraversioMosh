@@ -108,6 +108,7 @@ public struct MoshTerminalScreen: Sendable {
     private var savedCursorState: MoshTerminalSavedCursorState?
     private var escapeState: EscapeState?
     private var wrapPending: Bool
+    private var tabStops: Set<Int>
 
     public init(dimensions: MoshTerminalDimensions) {
         self.dimensions = dimensions
@@ -121,6 +122,7 @@ public struct MoshTerminalScreen: Sendable {
         self.savedCursorState = nil
         self.escapeState = nil
         self.wrapPending = false
+        self.tabStops = Self.defaultTabStops(columnCount: Int(dimensions.columns))
     }
 
     public var snapshot: MoshTerminalScreenSnapshot {
@@ -181,6 +183,7 @@ public struct MoshTerminalScreen: Sendable {
         )
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.wrapPending = false
+        self.tabStops = self.tabStops.filter { $0 <= self.maximumColumn }
         self.alternateBuffer = self.alternateBuffer?.resized(to: dimensions)
         self.normalBuffer = self.normalBuffer?.resized(to: dimensions)
         self.savedCursorState = self.savedCursorState?.clamped(
@@ -210,11 +213,7 @@ public struct MoshTerminalScreen: Sendable {
             )
         case .horizontalTab:
             self.wrapPending = false
-            let nextTabColumn = ((self.cursor.column / 8) + 1) * 8
-            self.cursor = MoshTerminalCursor(
-                row: self.cursor.row,
-                column: min(nextTabColumn, self.maximumColumn)
-            )
+            self.moveForwardTabStops(count: 1)
         case .lineFeed:
             self.wrapPending = false
             self.index()
@@ -237,6 +236,8 @@ public struct MoshTerminalScreen: Sendable {
                 self.index()
             case 0x8d:
                 self.reverseIndex()
+            case 0x88:
+                self.setTabStop()
             case 0x9b:
                 self.escapeState = .csi(CSIState())
                 self.wrapPending = false
@@ -623,6 +624,9 @@ public struct MoshTerminalScreen: Sendable {
         case (.escape, .scalar("8")):
             self.restoreCursorState()
             self.escapeState = nil
+        case (.escape, .scalar("H")):
+            self.setTabStop()
+            self.escapeState = nil
         case (.escape, .scalar("D")):
             self.index()
             self.escapeState = nil
@@ -708,6 +712,16 @@ public struct MoshTerminalScreen: Sendable {
             self.moveCursor(rowDelta: 0, columnDelta: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "D"):
             self.moveCursor(rowDelta: 0, columnDelta: -Self.parameter(values, at: 0, default: 1))
+        case UInt8(ascii: "E"):
+            self.setCursor(
+                row: self.cursor.row + Self.parameter(values, at: 0, default: 1),
+                column: 0
+            )
+        case UInt8(ascii: "F"):
+            self.setCursor(
+                row: self.cursor.row - Self.parameter(values, at: 0, default: 1),
+                column: 0
+            )
         case UInt8(ascii: "G"):
             self.setCursor(
                 row: self.cursor.row,
@@ -718,6 +732,8 @@ public struct MoshTerminalScreen: Sendable {
                 row: Self.parameter(values, at: 0, default: 1) - 1,
                 column: Self.parameter(values, at: 1, default: 1) - 1
             )
+        case UInt8(ascii: "I"):
+            self.moveForwardTabStops(count: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "J"):
             self.eraseScreen(mode: Self.parameter(values, at: 0, default: 0))
         case UInt8(ascii: "K"):
@@ -734,6 +750,24 @@ public struct MoshTerminalScreen: Sendable {
             self.scrollDown(count: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "X"):
             self.eraseCharacters(count: Self.parameter(values, at: 0, default: 1))
+        case UInt8(ascii: "Z"):
+            self.moveBackwardTabStops(count: Self.parameter(values, at: 0, default: 1))
+        case UInt8(ascii: "`"):
+            self.setCursor(
+                row: self.cursor.row,
+                column: Self.parameter(values, at: 0, default: 1) - 1
+            )
+        case UInt8(ascii: "a"):
+            self.moveCursor(rowDelta: 0, columnDelta: Self.parameter(values, at: 0, default: 1))
+        case UInt8(ascii: "d"):
+            self.setCursor(
+                row: Self.parameter(values, at: 0, default: 1) - 1,
+                column: self.cursor.column
+            )
+        case UInt8(ascii: "e"):
+            self.moveCursor(rowDelta: Self.parameter(values, at: 0, default: 1), columnDelta: 0)
+        case UInt8(ascii: "g"):
+            self.clearTabStops(mode: Self.parameter(values, at: 0, default: 0))
         case UInt8(ascii: "h"):
             if isPrivate {
                 values.compactMap { $0 }.forEach { self.setPrivateMode($0, enabled: true) }
@@ -761,6 +795,7 @@ public struct MoshTerminalScreen: Sendable {
         self.savedCursorState = nil
         self.escapeState = nil
         self.wrapPending = false
+        self.tabStops = Self.defaultTabStops(columnCount: Int(self.dimensions.columns))
     }
 
     private mutating func moveCursor(rowDelta: Int, columnDelta: Int) {
@@ -775,6 +810,65 @@ public struct MoshTerminalScreen: Sendable {
             row: min(max(row, 0), self.maximumRow),
             column: min(max(column, 0), self.maximumColumn)
         )
+        self.wrapPending = false
+    }
+
+    private mutating func moveForwardTabStops(count: Int) {
+        let amount = max(count, 0)
+        guard amount > 0 else {
+            return
+        }
+
+        var column = self.cursor.column
+        for _ in 0..<amount {
+            let nextColumn = self.nextTabStop(after: column)
+            guard nextColumn != column else {
+                break
+            }
+            column = nextColumn
+        }
+        self.setCursor(row: self.cursor.row, column: column)
+    }
+
+    private mutating func moveBackwardTabStops(count: Int) {
+        let amount = max(count, 0)
+        guard amount > 0 else {
+            return
+        }
+
+        var column = self.cursor.column
+        for _ in 0..<amount {
+            let previousColumn = self.previousTabStop(before: column)
+            guard previousColumn != column else {
+                break
+            }
+            column = previousColumn
+        }
+        self.setCursor(row: self.cursor.row, column: column)
+    }
+
+    private func nextTabStop(after column: Int) -> Int {
+        self.tabStops.filter { $0 > column }.min() ?? self.maximumColumn
+    }
+
+    private func previousTabStop(before column: Int) -> Int {
+        self.tabStops.filter { $0 < column }.max() ?? 0
+    }
+
+    private mutating func setTabStop() {
+        self.tabStops.insert(self.cursor.column)
+        self.wrapPending = false
+    }
+
+    private mutating func clearTabStops(mode: Int) {
+        switch mode {
+        case 0:
+            self.tabStops.remove(self.cursor.column)
+        case 3:
+            self.tabStops.removeAll()
+        default:
+            break
+        }
         self.wrapPending = false
     }
 
@@ -964,6 +1058,13 @@ public struct MoshTerminalScreen: Sendable {
 
     fileprivate static func blankRow(columnCount: Int) -> [MoshTerminalCell] {
         Array(repeating: .blank, count: columnCount)
+    }
+
+    private static func defaultTabStops(columnCount: Int) -> Set<Int> {
+        guard columnCount > 0 else {
+            return []
+        }
+        return Set(stride(from: 8, to: columnCount, by: 8))
     }
 
     fileprivate static func resizedRows(

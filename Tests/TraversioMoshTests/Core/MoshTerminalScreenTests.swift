@@ -28,6 +28,26 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func horizontalTabUsesMutableTabStops() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 12, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[3g\u{1b}[4G\u{1b}H\r\tX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["   X        "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+    }
+
+    @Test
+    func tabClearCurrentRemovesCustomTabStop() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 12, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[3g\u{1b}[4G\u{1b}H\u{1b}[g\r\tX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["           X"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 11))
+    }
+
+    @Test
     func resizePreservesTopLeftCellsAndClampsCursor() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
@@ -57,6 +77,41 @@ struct MoshTerminalScreenTests {
 
         #expect(screen.snapshot.lineStrings == ["abc  ", "  X  "])
         #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
+    }
+
+    @Test
+    func csiNextAndPrecedingLineMoveToColumnZero() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 3))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4H\u{1b}[EZ\u{1b}[FQ".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["     ", "Q    ", "Z    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
+    func csiHorizontalAndVerticalPositioningMovesCursor() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;2H\u{1b}[4`A\u{1b}[2aB\u{1b}[4dC\u{1b}[1eD".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "        ",
+            "   A  B ",
+            "        ",
+            "       C",
+            "       D"
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: 7))
+    }
+
+    @Test
+    func csiForwardAndBackwardTabulationUseTabStops() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 20, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[3C\u{1b}[2I\u{1b}[Z".utf8)))
+
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 8))
     }
 
     @Test
