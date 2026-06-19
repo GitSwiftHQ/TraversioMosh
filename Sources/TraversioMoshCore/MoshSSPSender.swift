@@ -41,11 +41,12 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
 
     public init(
         initialState: State,
+        initialSentAtMilliseconds: UInt64 = 0,
         acknowledgementNumber: UInt64 = 0,
         chaffSource: MoshSSPChaffSource = .random
     ) {
         self.currentState = initialState
-        self.sentStates = [MoshSentState(number: 0, sentAtMilliseconds: 0, state: initialState)]
+        self.sentStates = [MoshSentState(number: 0, sentAtMilliseconds: initialSentAtMilliseconds, state: initialState)]
         self.acknowledgementNumberStorage = acknowledgementNumber
         self.assumedReceiverNumber = 0
         self.chaffSource = chaffSource
@@ -61,6 +62,10 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
 
     public var lastSentStateNumber: UInt64 {
         self.sentStates[self.sentStates.count - 1].number
+    }
+
+    public var lastSentAtMilliseconds: UInt64 {
+        self.sentStates[self.sentStates.count - 1].sentAtMilliseconds
     }
 
     public var assumedReceiverStateNumber: UInt64 {
@@ -88,6 +93,41 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
         if self.sentStates.contains(where: { $0.number == self.assumedReceiverNumber }) == false {
             self.assumedReceiverNumber = self.sentStates[0].number
         }
+    }
+
+    public mutating func makeAcknowledgementInstruction(
+        nowMilliseconds: UInt64,
+        timeoutMilliseconds: UInt64
+    ) throws -> MoshTransportInstruction {
+        try self.updateAssumedReceiverState(
+            nowMilliseconds: nowMilliseconds,
+            timeoutMilliseconds: timeoutMilliseconds
+        )
+
+        let lastNumber = self.sentStates[self.sentStates.count - 1].number
+        guard lastNumber < UInt64.max else {
+            throw MoshSSPError.stateNumberOverflow
+        }
+
+        let newNumber = lastNumber + 1
+        let assumedReceiverState = self.sentStates[self.assumedReceiverIndex]
+        self.addSentState(
+            MoshSentState(
+                number: newNumber,
+                sentAtMilliseconds: nowMilliseconds,
+                state: self.currentState
+            )
+        )
+
+        return MoshTransportInstruction(
+            protocolVersion: Self.protocolVersion,
+            oldNumber: assumedReceiverState.number,
+            newNumber: newNumber,
+            acknowledgementNumber: self.acknowledgementNumberStorage,
+            throwawayNumber: self.sentStates[0].number,
+            diff: [],
+            chaff: self.chaffSource.bytes()
+        )
     }
 
     public mutating func makeDataInstruction(
@@ -142,6 +182,28 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
 
     private var assumedReceiverIndex: Int {
         self.sentStates.firstIndex { $0.number == self.assumedReceiverNumber } ?? 0
+    }
+
+    var currentStateMatchesKnownAcknowledgedState: Bool {
+        self.currentState == self.sentStates[0].state
+    }
+
+    var currentStateMatchesLastSentState: Bool {
+        self.currentState == self.sentStates[self.sentStates.count - 1].state
+    }
+
+    var currentStateMatchesAssumedReceiverState: Bool {
+        self.currentState == self.sentStates[self.assumedReceiverIndex].state
+    }
+
+    mutating func refreshAssumedReceiverState(
+        nowMilliseconds: UInt64,
+        timeoutMilliseconds: UInt64
+    ) throws {
+        try self.updateAssumedReceiverState(
+            nowMilliseconds: nowMilliseconds,
+            timeoutMilliseconds: timeoutMilliseconds
+        )
     }
 
     private mutating func updateAssumedReceiverState(
