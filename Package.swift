@@ -71,6 +71,7 @@ let package = Package(
             name: "TraversioMoshTests",
             dependencies: [
                 "TraversioMoshBootstrap",
+                "TraversioMoshCore",
                 "TraversioMoshCrypto",
                 "TraversioMoshWire",
             ]
