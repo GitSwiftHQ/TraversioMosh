@@ -14,6 +14,8 @@ public protocol MoshSynchronizedState: Equatable, Sendable {
 public enum MoshSSPError: Error, Equatable, Sendable {
     case protocolVersionMismatch(UInt32)
     case throwawayAfterReference(throwawayNumber: UInt64, oldNumber: UInt64)
+    case stateNumberOverflow
+    case clockMovedBackward(nowMilliseconds: UInt64, sentAtMilliseconds: UInt64)
 }
 
 public enum MoshSSPReceiveResult: Equatable, Sendable {
