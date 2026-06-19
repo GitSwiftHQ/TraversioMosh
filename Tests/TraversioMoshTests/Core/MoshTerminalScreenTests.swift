@@ -58,6 +58,17 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func sgrSequenceDoesNotClearPendingWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[31mX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abc", "X  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+        #expect(screen.snapshot.rows[1][0].attributes.foregroundColor == .ansi(.red, isBright: false))
+    }
+
+    @Test
     func privateCursorVisibilityModeUpdatesSnapshot() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
@@ -78,6 +89,53 @@ struct MoshTerminalScreenTests {
         try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?25l\u{1b}c".utf8)))
 
         #expect(screen.snapshot.isCursorVisible == true)
+    }
+
+    @Test
+    func saveRestoreCursorPreservesPendingWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}7\u{1b}[1;1H!\u{1b}8X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["!bc", "X  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
+    func saveRestoreCursorPreservesOriginMode() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4r\u{1b}[?6h\u{1b}7\u{1b}[?6l\u{1b}8\u{1b}[1;1HX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "     ",
+            "X    ",
+            "     ",
+            "     ",
+            "     "
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
+    func csiSaveAndRestoreCursorMatchesEscapeSaveRestore() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ab\u{1b}[s\u{1b}[1;1H!\u{1b}[uX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["!bX "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+    }
+
+    @Test
+    func restoreCursorWithoutPriorSaveUsesDefaultState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[31mAB\u{1b}8X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["XB  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+        #expect(screen.snapshot.rows[0][0].attributes == .default)
     }
 
     @Test
@@ -471,6 +529,21 @@ struct MoshTerminalScreenTests {
         #expect(screen.snapshot.lineStrings == ["main", "  XY"])
         #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
         #expect(screen.snapshot.rows[1][3].attributes.foregroundColor == .ansi(.red, isBright: false))
+    }
+
+    @Test
+    func alternateScreenUsesSeparateSavedCursorState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("A\u{1b}[2;4H\u{1b}[31mN\u{1b}[?1049hQ\u{1b}7\u{1b}[1;5HR\u{1b}8S\u{1b}[?1049lY".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["A    ", "   NY"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 4))
+        #expect(screen.snapshot.rows[1][4].attributes.foregroundColor == .ansi(.red, isBright: false))
     }
 
     @Test

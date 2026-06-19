@@ -108,7 +108,8 @@ public struct MoshTerminalScreen: Sendable {
     private var currentAttributes: MoshTerminalTextAttributes
     private var alternateBuffer: MoshTerminalScreenBuffer?
     private var normalBuffer: MoshTerminalScreenBuffer?
-    private var savedCursorState: MoshTerminalSavedCursorState?
+    private var normalSavedCursorState: MoshTerminalSavedCursorState?
+    private var alternateSavedCursorState: MoshTerminalSavedCursorState?
     private var escapeState: EscapeState?
     private var wrapPending: Bool
     private var tabStops: Set<Int>
@@ -126,7 +127,8 @@ public struct MoshTerminalScreen: Sendable {
         self.currentAttributes = .default
         self.alternateBuffer = nil
         self.normalBuffer = nil
-        self.savedCursorState = nil
+        self.normalSavedCursorState = nil
+        self.alternateSavedCursorState = nil
         self.escapeState = nil
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(dimensions.columns))
@@ -198,7 +200,11 @@ public struct MoshTerminalScreen: Sendable {
         self.tabStops = self.tabStops.filter { $0 <= self.maximumColumn }
         self.alternateBuffer = self.alternateBuffer?.resized(to: dimensions)
         self.normalBuffer = self.normalBuffer?.resized(to: dimensions)
-        self.savedCursorState = self.savedCursorState?.clamped(
+        self.normalSavedCursorState = self.normalSavedCursorState?.clamped(
+            maximumRow: self.maximumRow,
+            maximumColumn: self.maximumColumn
+        )
+        self.alternateSavedCursorState = self.alternateSavedCursorState?.clamped(
             maximumRow: self.maximumRow,
             maximumColumn: self.maximumColumn
         )
@@ -234,7 +240,6 @@ public struct MoshTerminalScreen: Sendable {
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
         case .escape:
             self.escapeState = .escape
-            self.wrapPending = false
         case .delete:
             break
         case .c0:
@@ -254,7 +259,6 @@ public struct MoshTerminalScreen: Sendable {
                 self.setTabStop()
             case 0x9b:
                 self.escapeState = .csi(CSIState())
-                self.wrapPending = false
             case 0x9d:
                 self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
             case 0x9e:
@@ -576,16 +580,16 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private mutating func saveCursorState() {
-        self.savedCursorState = MoshTerminalSavedCursorState(
+        self.activeSavedCursorState = MoshTerminalSavedCursorState(
             cursor: self.cursor,
-            attributes: self.currentAttributes
+            attributes: self.currentAttributes,
+            wrapPending: self.wrapPending,
+            originMode: self.originMode
         )
     }
 
     private mutating func restoreCursorState() {
-        guard let savedCursorState else {
-            return
-        }
+        let savedCursorState = self.activeSavedCursorState ?? .default
 
         self.cursor = Self.clampedCursor(
             savedCursorState.cursor,
@@ -593,7 +597,24 @@ public struct MoshTerminalScreen: Sendable {
             maximumColumn: self.maximumColumn
         )
         self.currentAttributes = savedCursorState.attributes
-        self.wrapPending = false
+        self.wrapPending = savedCursorState.wrapPending
+        self.originMode = savedCursorState.originMode
+    }
+
+    private var activeSavedCursorState: MoshTerminalSavedCursorState? {
+        get {
+            if self.normalBuffer == nil {
+                return self.normalSavedCursorState
+            }
+            return self.alternateSavedCursorState
+        }
+        set {
+            if self.normalBuffer == nil {
+                self.normalSavedCursorState = newValue
+            } else {
+                self.alternateSavedCursorState = newValue
+            }
+        }
     }
 
     private mutating func setPrivateMode(_ mode: Int, enabled: Bool) {
@@ -667,6 +688,9 @@ public struct MoshTerminalScreen: Sendable {
     ) {
         if let normalBuffer {
             self.alternateBuffer = clearAlternate ? .blank(dimensions: self.dimensions) : self.activeBuffer
+            if clearAlternate {
+                self.alternateSavedCursorState = nil
+            }
             self.restoreScreenBuffer(normalBuffer)
             self.normalBuffer = nil
         }
@@ -925,6 +949,14 @@ public struct MoshTerminalScreen: Sendable {
             self.applySGR(parameters: values)
         case UInt8(ascii: "r"):
             self.setScrollRegion(parameters: values)
+        case UInt8(ascii: "s"):
+            if parameters.isEmpty {
+                self.saveCursorState()
+            }
+        case UInt8(ascii: "u"):
+            if parameters.isEmpty {
+                self.restoreCursorState()
+            }
         default:
             break
         }
@@ -937,7 +969,8 @@ public struct MoshTerminalScreen: Sendable {
         self.currentAttributes = .default
         self.alternateBuffer = nil
         self.normalBuffer = nil
-        self.savedCursorState = nil
+        self.normalSavedCursorState = nil
+        self.alternateSavedCursorState = nil
         self.escapeState = nil
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(self.dimensions.columns))
@@ -1390,8 +1423,17 @@ private struct MoshTerminalScreenBuffer: Equatable, Sendable {
 }
 
 private struct MoshTerminalSavedCursorState: Equatable, Sendable {
+    static let `default` = MoshTerminalSavedCursorState(
+        cursor: MoshTerminalCursor(row: 0, column: 0),
+        attributes: .default,
+        wrapPending: false,
+        originMode: false
+    )
+
     var cursor: MoshTerminalCursor
     var attributes: MoshTerminalTextAttributes
+    var wrapPending: Bool
+    var originMode: Bool
 
     func clamped(
         maximumRow: Int,
@@ -1403,7 +1445,9 @@ private struct MoshTerminalSavedCursorState: Equatable, Sendable {
                 maximumRow: maximumRow,
                 maximumColumn: maximumColumn
             ),
-            attributes: self.attributes
+            attributes: self.attributes,
+            wrapPending: self.wrapPending,
+            originMode: self.originMode
         )
     }
 }
