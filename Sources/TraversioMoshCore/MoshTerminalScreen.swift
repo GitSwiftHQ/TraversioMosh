@@ -248,11 +248,19 @@ public struct MoshTerminalScreen: Sendable {
                 self.index()
             case 0x8d:
                 self.reverseIndex()
+            case 0x90:
+                self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
             case 0x88:
                 self.setTabStop()
             case 0x9b:
                 self.escapeState = .csi(CSIState())
                 self.wrapPending = false
+            case 0x9d:
+                self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
+            case 0x9e:
+                self.escapeState = .stringControl(StringControlState(kind: .privacyMessage))
+            case 0x9f:
+                self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
             default:
                 break
             }
@@ -696,6 +704,16 @@ public struct MoshTerminalScreen: Sendable {
         switch (state, token) {
         case (.escape, .scalar("[")):
             self.escapeState = .csi(CSIState())
+        case (.escape, .scalar("P")):
+            self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
+        case (.escape, .scalar("X")):
+            self.escapeState = .stringControl(StringControlState(kind: .startOfString))
+        case (.escape, .scalar("]")):
+            self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
+        case (.escape, .scalar("^")):
+            self.escapeState = .stringControl(StringControlState(kind: .privacyMessage))
+        case (.escape, .scalar("_")):
+            self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
         case (.escape, .scalar("7")):
             self.saveCursorState()
             self.escapeState = nil
@@ -719,6 +737,16 @@ public struct MoshTerminalScreen: Sendable {
             self.reset()
         case (.escape, .control(.c1(0x9b))):
             self.escapeState = .csi(CSIState())
+        case (.escape, .control(.c1(0x90))):
+            self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
+        case (.escape, .control(.c1(0x98))):
+            self.escapeState = .stringControl(StringControlState(kind: .startOfString))
+        case (.escape, .control(.c1(0x9d))):
+            self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
+        case (.escape, .control(.c1(0x9e))):
+            self.escapeState = .stringControl(StringControlState(kind: .privacyMessage))
+        case (.escape, .control(.c1(0x9f))):
+            self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
         case (.escape, _):
             self.escapeState = nil
         case (.csi(let csiState), .scalar(let scalar)):
@@ -727,6 +755,45 @@ public struct MoshTerminalScreen: Sendable {
             self.escapeState = .escape
         case (.csi, _):
             break
+        case (.stringControl(let stringState), _):
+            self.consumeStringControl(token: token, state: stringState)
+        }
+    }
+
+    private mutating func consumeStringControl(
+        token: MoshTerminalInputToken,
+        state: StringControlState
+    ) {
+        switch token {
+        case .control(.bell) where state.kind == .operatingSystemCommand:
+            self.escapeState = nil
+            return
+        case .control(.c1(0x9c)):
+            self.escapeState = nil
+            return
+        default:
+            break
+        }
+
+        if state.pendingEscape {
+            if case .scalar("\\") = token {
+                self.escapeState = nil
+                return
+            }
+
+            var nextState = state
+            nextState.pendingEscape = token == .control(.escape)
+            self.escapeState = .stringControl(nextState)
+            return
+        }
+
+        switch token {
+        case .control(.escape):
+            var nextState = state
+            nextState.pendingEscape = true
+            self.escapeState = .stringControl(nextState)
+        default:
+            self.escapeState = .stringControl(state)
         }
     }
 
@@ -1242,11 +1309,25 @@ public struct MoshTerminalScreen: Sendable {
 private enum EscapeState: Equatable, Sendable {
     case escape
     case csi(CSIState)
+    case stringControl(StringControlState)
 }
 
 private struct CSIState: Equatable, Sendable {
     var parameters: String = ""
     var intermediates: String = ""
+}
+
+private enum StringControlKind: Equatable, Sendable {
+    case deviceControl
+    case startOfString
+    case operatingSystemCommand
+    case privacyMessage
+    case applicationProgramCommand
+}
+
+private struct StringControlState: Equatable, Sendable {
+    var kind: StringControlKind
+    var pendingEscape = false
 }
 
 private struct MoshTerminalScrollRegion: Equatable, Sendable {

@@ -281,6 +281,57 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func oscTitleStringTerminatedByBellDoesNotRenderPayload() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}]0;title\u{07}B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func oscStringTerminatedBySTDoesNotRenderPayloadAcrossWrites() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}]2;title".utf8)))
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}\\B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func oscBellTerminatorAfterEscapeStillEndsString() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}]2;title\u{1b}\u{07}B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func stringControlC1STTerminatorEndsString() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}Pignored\u{009c}B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func dcsPMAndAPCStringControlsDoNotRenderPayload() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}Pignored\u{1b}\\B\u{1b}^hidden\u{1b}\\C\u{1b}_skip\u{1b}\\D".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["ABCD  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+    }
+
+    @Test
     func scrollRegionConstrainsLineFeedScrolling() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
 
