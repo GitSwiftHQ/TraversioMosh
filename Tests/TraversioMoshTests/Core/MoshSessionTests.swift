@@ -124,6 +124,55 @@ struct MoshSessionTests {
     }
 
     @Test
+    func renderOperationStreamFiltersProtocolOnlyHostOperations() async throws {
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24)
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 3)
+        let renderOperationTask = collectRenderOperations(from: fixture.session, count: 2)
+        let hostDimensions = try MoshTerminalDimensions(columns: 100, rows: 32)
+        let hostOperations: [MoshHostOperation] = [
+            .write(MoshTerminalOutput(bytes: [0x48, 0x69])),
+            .echoAcknowledgement(42),
+            .resize(hostDimensions),
+        ]
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(contentsOf: hostOperations)
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            let receivedHostOperations = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            let receivedRenderOperations = try await withSessionTimeout {
+                try await renderOperationTask.value
+            }
+
+            #expect(receivedHostOperations == hostOperations)
+            #expect(receivedRenderOperations == [
+                .write(MoshTerminalOutput(bytes: [0x48, 0x69])),
+                .resize(hostDimensions),
+            ])
+            #expect(await fixture.session.snapshot.renderSnapshot == MoshTerminalRenderSnapshot(
+                dimensions: hostDimensions,
+                operations: receivedRenderOperations
+            ))
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            hostOperationTask.cancel()
+            renderOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
     func lifecycleRejectsInvalidStartAndStoppedOperations() async throws {
         let fixture = try await makeSessionFixture(columns: 80, rows: 24)
 
@@ -578,6 +627,23 @@ private func collectHostOperations(
     Task {
         var iterator = session.hostOperations.makeAsyncIterator()
         var operations: [MoshHostOperation] = []
+        while operations.count < count {
+            guard let operation = try await iterator.next() else {
+                break
+            }
+            operations.append(operation)
+        }
+        return operations
+    }
+}
+
+private func collectRenderOperations(
+    from session: MoshSession,
+    count: Int
+) -> Task<[MoshTerminalRenderOperation], Error> {
+    Task {
+        var iterator = session.renderOperations.makeAsyncIterator()
+        var operations: [MoshTerminalRenderOperation] = []
         while operations.count < count {
             guard let operation = try await iterator.next() else {
                 break

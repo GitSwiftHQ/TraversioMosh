@@ -119,6 +119,28 @@ public enum MoshHostOperation: Equatable, Sendable {
     }
 }
 
+public enum MoshTerminalRenderOperation: Equatable, Sendable {
+    case write(MoshTerminalOutput)
+    case resize(MoshTerminalDimensions)
+
+    public init?(_ hostOperation: MoshHostOperation) {
+        switch hostOperation {
+        case .write(let output):
+            self = .write(output)
+        case .resize(let dimensions):
+            self = .resize(dimensions)
+        case .echoAcknowledgement:
+            return nil
+        }
+    }
+
+    public static func operations(
+        from hostOperations: [MoshHostOperation]
+    ) -> [MoshTerminalRenderOperation] {
+        hostOperations.compactMap(MoshTerminalRenderOperation.init)
+    }
+}
+
 public struct MoshTerminalSnapshot: Equatable, Sendable {
     public let dimensions: MoshTerminalDimensions?
     public let operations: [MoshHostOperation]
@@ -132,5 +154,29 @@ public struct MoshTerminalSnapshot: Equatable, Sendable {
         self.dimensions = dimensions
         self.operations = operations
         self.latestEchoAcknowledgementNumber = latestEchoAcknowledgementNumber
+    }
+
+    public var renderOperations: [MoshTerminalRenderOperation] {
+        MoshTerminalRenderOperation.operations(from: self.operations)
+    }
+
+    public var renderSnapshot: MoshTerminalRenderSnapshot {
+        MoshTerminalRenderSnapshot(
+            dimensions: self.dimensions,
+            operations: self.renderOperations
+        )
+    }
+}
+
+public struct MoshTerminalRenderSnapshot: Equatable, Sendable {
+    public let dimensions: MoshTerminalDimensions?
+    public let operations: [MoshTerminalRenderOperation]
+
+    public init(
+        dimensions: MoshTerminalDimensions?,
+        operations: [MoshTerminalRenderOperation]
+    ) {
+        self.dimensions = dimensions
+        self.operations = operations
     }
 }

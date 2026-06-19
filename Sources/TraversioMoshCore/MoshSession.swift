@@ -83,13 +83,16 @@ public enum MoshSessionEvent: Equatable, Sendable {
 
 public actor MoshSession {
     public typealias HostOperationStream = AsyncThrowingStream<MoshHostOperation, Error>
+    public typealias RenderOperationStream = AsyncThrowingStream<MoshTerminalRenderOperation, Error>
     public typealias DiagnosticEventStream = AsyncStream<MoshSessionEvent>
 
     public nonisolated let hostOperations: HostOperationStream
+    public nonisolated let renderOperations: RenderOperationStream
     public nonisolated let diagnosticEvents: DiagnosticEventStream
 
     private let configuration: MoshSessionConfiguration
     private let hostOperationContinuation: HostOperationStream.Continuation
+    private let renderOperationContinuation: RenderOperationStream.Continuation
     private let diagnosticEventContinuation: DiagnosticEventStream.Continuation
 
     private var terminalEngine: MoshTerminalStateEngine
@@ -103,14 +106,18 @@ public actor MoshSession {
     public init(
         configuration: MoshSessionConfiguration,
         hostOperationBufferingPolicy: HostOperationStream.Continuation.BufferingPolicy = .bufferingNewest(512),
+        renderOperationBufferingPolicy: RenderOperationStream.Continuation.BufferingPolicy = .bufferingNewest(512),
         diagnosticEventBufferingPolicy: DiagnosticEventStream.Continuation.BufferingPolicy = .bufferingNewest(512)
     ) {
         let hostOperationStream = Self.makeHostOperationStream(bufferingPolicy: hostOperationBufferingPolicy)
+        let renderOperationStream = Self.makeRenderOperationStream(bufferingPolicy: renderOperationBufferingPolicy)
         let diagnosticEventStream = Self.makeDiagnosticEventStream(bufferingPolicy: diagnosticEventBufferingPolicy)
 
         self.configuration = configuration
         self.hostOperations = hostOperationStream.stream
         self.hostOperationContinuation = hostOperationStream.continuation
+        self.renderOperations = renderOperationStream.stream
+        self.renderOperationContinuation = renderOperationStream.continuation
         self.diagnosticEvents = diagnosticEventStream.stream
         self.diagnosticEventContinuation = diagnosticEventStream.continuation
 
@@ -123,6 +130,7 @@ public actor MoshSession {
         self.receiveTask?.cancel()
         self.maintenanceTask?.cancel()
         self.hostOperationContinuation.finish()
+        self.renderOperationContinuation.finish()
         self.diagnosticEventContinuation.finish()
     }
 
@@ -188,6 +196,7 @@ public actor MoshSession {
         await self.runtime?.stop()
         self.runtime = nil
         self.hostOperationContinuation.finish()
+        self.renderOperationContinuation.finish()
         self.diagnosticEventContinuation.yield(.stopped)
         self.diagnosticEventContinuation.finish()
     }
@@ -249,6 +258,9 @@ public actor MoshSession {
         let operations = self.terminalEngine.acceptHostState(state.state)
         for operation in operations {
             self.hostOperationContinuation.yield(operation)
+            if let renderOperation = MoshTerminalRenderOperation(operation) {
+                self.renderOperationContinuation.yield(renderOperation)
+            }
         }
         self.diagnosticEventContinuation.yield(
             .hostStateReceived(number: state.number, operationCount: operations.count)
@@ -271,8 +283,10 @@ public actor MoshSession {
         self.runtime = nil
         if let error {
             self.hostOperationContinuation.finish(throwing: error)
+            self.renderOperationContinuation.finish(throwing: error)
         } else {
             self.hostOperationContinuation.finish()
+            self.renderOperationContinuation.finish()
         }
         self.diagnosticEventContinuation.yield(.stopped)
         self.diagnosticEventContinuation.finish()
@@ -304,6 +318,7 @@ public actor MoshSession {
         await self.runtime?.stop()
         self.runtime = nil
         self.hostOperationContinuation.finish(throwing: error)
+        self.renderOperationContinuation.finish(throwing: error)
         self.diagnosticEventContinuation.yield(.stopped)
         self.diagnosticEventContinuation.finish()
     }
@@ -407,6 +422,21 @@ public actor MoshSession {
     ) -> (stream: HostOperationStream, continuation: HostOperationStream.Continuation) {
         var capturedContinuation: HostOperationStream.Continuation?
         let stream = HostOperationStream(bufferingPolicy: bufferingPolicy) { continuation in
+            capturedContinuation = continuation
+        }
+
+        guard let capturedContinuation else {
+            preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+
+        return (stream, capturedContinuation)
+    }
+
+    private static func makeRenderOperationStream(
+        bufferingPolicy: RenderOperationStream.Continuation.BufferingPolicy
+    ) -> (stream: RenderOperationStream, continuation: RenderOperationStream.Continuation) {
+        var capturedContinuation: RenderOperationStream.Continuation?
+        let stream = RenderOperationStream(bufferingPolicy: bufferingPolicy) { continuation in
             capturedContinuation = continuation
         }
 

@@ -35,6 +35,36 @@ struct MoshTerminalStateTests {
     }
 
     @Test
+    func renderSnapshotFiltersProtocolOnlyHostOperations() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 120, rows: 50)
+        let hostOperations: [MoshHostOperation] = [
+            .write(MoshTerminalOutput(bytes: Array("hello".utf8))),
+            .echoAcknowledgement(12),
+            .resize(dimensions),
+            .echoAcknowledgement(13),
+        ]
+        let snapshot = MoshTerminalSnapshot(
+            dimensions: dimensions,
+            operations: hostOperations,
+            latestEchoAcknowledgementNumber: 13
+        )
+
+        #expect(snapshot.renderOperations == [
+            .write(MoshTerminalOutput(bytes: Array("hello".utf8))),
+            .resize(dimensions),
+        ])
+        #expect(
+            snapshot.renderSnapshot == MoshTerminalRenderSnapshot(
+                dimensions: dimensions,
+                operations: [
+                    .write(MoshTerminalOutput(bytes: Array("hello".utf8))),
+                    .resize(dimensions),
+                ]
+            )
+        )
+    }
+
+    @Test
     func clientStateDiffCarriesOperationSuffix() throws {
         let initial = MoshTerminalClientState(operations: [
             .keystrokes(Array("a".utf8)),
