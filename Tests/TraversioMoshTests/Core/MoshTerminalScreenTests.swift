@@ -80,6 +80,76 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func sgrAppliesStylesToNewCellsAndResetRestoresDefaults() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[1;3;4;7;31mA\u{1b}[0mB".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB "])
+        #expect(
+            screen.snapshot.rows[0][0].attributes == MoshTerminalTextAttributes(
+                intensity: .bold,
+                isItalic: true,
+                isUnderlined: true,
+                isInverse: true,
+                foregroundColor: .ansi(.red, isBright: false)
+            )
+        )
+        #expect(screen.snapshot.rows[0][1].attributes == .default)
+    }
+
+    @Test
+    func sgrSupportsBrightForegroundAndBackgroundColors() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[92;104mX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["X "])
+        #expect(screen.snapshot.rows[0][0].attributes.foregroundColor == .ansi(.green, isBright: true))
+        #expect(screen.snapshot.rows[0][0].attributes.backgroundColor == .ansi(.blue, isBright: true))
+    }
+
+    @Test
+    func sgrSupportsIndexedAndRGBColors() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[38;5;196;48;2;1;2;3mX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["X "])
+        #expect(screen.snapshot.rows[0][0].attributes.foregroundColor == .indexed(196))
+        #expect(screen.snapshot.rows[0][0].attributes.backgroundColor == .rgb(red: 1, green: 2, blue: 3))
+    }
+
+    @Test
+    func sgrDisableCodesClearIndividualAttributes() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(bytes: Array("\u{1b}[1;3;4;7;33;44mA\u{1b}[22;23;24;27;39;49mB".utf8))
+        )
+
+        #expect(screen.snapshot.lineStrings == ["AB "])
+        #expect(screen.snapshot.rows[0][0].attributes.intensity == .bold)
+        #expect(screen.snapshot.rows[0][0].attributes.isItalic == true)
+        #expect(screen.snapshot.rows[0][0].attributes.isUnderlined == true)
+        #expect(screen.snapshot.rows[0][0].attributes.isInverse == true)
+        #expect(screen.snapshot.rows[0][0].attributes.foregroundColor == .ansi(.yellow, isBright: false))
+        #expect(screen.snapshot.rows[0][0].attributes.backgroundColor == .ansi(.blue, isBright: false))
+        #expect(screen.snapshot.rows[0][1].attributes == .default)
+    }
+
+    @Test
+    func emptySGRSequenceResetsAttributes() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[31mA\u{1b}[mB".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB "])
+        #expect(screen.snapshot.rows[0][0].attributes.foregroundColor == .ansi(.red, isBright: false))
+        #expect(screen.snapshot.rows[0][1].attributes == .default)
+    }
+
+    @Test
     func resetEscapeClearsScreenAndCursor() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
 

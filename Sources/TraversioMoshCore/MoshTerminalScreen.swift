@@ -17,17 +17,29 @@ public struct MoshTerminalCell: Equatable, Sendable {
     public static let blank = MoshTerminalCell(contents: " ")
 
     public let contents: String
+    public let attributes: MoshTerminalTextAttributes
 
-    public init(contents: String) {
+    public init(
+        contents: String,
+        attributes: MoshTerminalTextAttributes = .default
+    ) {
         self.contents = contents
+        self.attributes = attributes
     }
 
-    init(scalar: Unicode.Scalar) {
+    init(
+        scalar: Unicode.Scalar,
+        attributes: MoshTerminalTextAttributes
+    ) {
         self.contents = String(scalar)
+        self.attributes = attributes
     }
 
     func appending(_ scalar: Unicode.Scalar) -> MoshTerminalCell {
-        MoshTerminalCell(contents: self.contents + String(scalar))
+        MoshTerminalCell(
+            contents: self.contents + String(scalar),
+            attributes: self.attributes
+        )
     }
 }
 
@@ -59,6 +71,7 @@ public struct MoshTerminalScreen: Sendable {
 
     private var parser: MoshTerminalInputParser
     private var rows: [[MoshTerminalCell]]
+    private var currentAttributes: MoshTerminalTextAttributes
     private var escapeState: EscapeState?
     private var wrapPending: Bool
 
@@ -67,6 +80,7 @@ public struct MoshTerminalScreen: Sendable {
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
         self.parser = MoshTerminalInputParser()
         self.rows = Self.blankRows(dimensions: dimensions)
+        self.currentAttributes = .default
         self.escapeState = nil
         self.wrapPending = false
     }
@@ -199,7 +213,10 @@ public struct MoshTerminalScreen: Sendable {
             self.wrapPending = false
         }
 
-        self.rows[self.cursor.row][self.cursor.column] = MoshTerminalCell(scalar: scalar)
+        self.rows[self.cursor.row][self.cursor.column] = MoshTerminalCell(
+            scalar: scalar,
+            attributes: self.currentAttributes
+        )
         if self.cursor.column == self.maximumColumn {
             self.wrapPending = true
         } else {
@@ -299,6 +316,8 @@ public struct MoshTerminalScreen: Sendable {
             self.eraseScreen(mode: Self.parameter(values, at: 0, default: 0))
         case UInt8(ascii: "K"):
             self.eraseLine(mode: Self.parameter(values, at: 0, default: 0))
+        case UInt8(ascii: "m"):
+            self.applySGR(parameters: values)
         default:
             break
         }
@@ -307,6 +326,7 @@ public struct MoshTerminalScreen: Sendable {
     private mutating func reset() {
         self.rows = Self.blankRows(dimensions: self.dimensions)
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
+        self.currentAttributes = .default
         self.escapeState = nil
         self.wrapPending = false
     }
@@ -363,6 +383,113 @@ public struct MoshTerminalScreen: Sendable {
     private mutating func blankCells(row: Int, columns: ClosedRange<Int>) {
         for column in columns {
             self.rows[row][column] = .blank
+        }
+    }
+
+    private mutating func applySGR(parameters: [Int?]) {
+        let values = parameters.isEmpty ? [0] : parameters.map { $0 ?? 0 }
+        var index = 0
+
+        while index < values.count {
+            let value = values[index]
+
+            switch value {
+            case 0:
+                self.currentAttributes = .default
+            case 1:
+                self.currentAttributes.intensity = .bold
+            case 2:
+                self.currentAttributes.intensity = .faint
+            case 22:
+                self.currentAttributes.intensity = .normal
+            case 3:
+                self.currentAttributes.isItalic = true
+            case 23:
+                self.currentAttributes.isItalic = false
+            case 4:
+                self.currentAttributes.isUnderlined = true
+            case 24:
+                self.currentAttributes.isUnderlined = false
+            case 7:
+                self.currentAttributes.isInverse = true
+            case 27:
+                self.currentAttributes.isInverse = false
+            case 30...37:
+                self.currentAttributes.foregroundColor = Self.ansiColor(
+                    code: value - 30,
+                    isBright: false
+                )
+            case 39:
+                self.currentAttributes.foregroundColor = nil
+            case 40...47:
+                self.currentAttributes.backgroundColor = Self.ansiColor(
+                    code: value - 40,
+                    isBright: false
+                )
+            case 49:
+                self.currentAttributes.backgroundColor = nil
+            case 90...97:
+                self.currentAttributes.foregroundColor = Self.ansiColor(
+                    code: value - 90,
+                    isBright: true
+                )
+            case 100...107:
+                self.currentAttributes.backgroundColor = Self.ansiColor(
+                    code: value - 100,
+                    isBright: true
+                )
+            case 38:
+                if let result = Self.extendedColor(values: values, startIndex: index + 1) {
+                    self.currentAttributes.foregroundColor = result.color
+                    index = result.nextIndex
+                    continue
+                }
+            case 48:
+                if let result = Self.extendedColor(values: values, startIndex: index + 1) {
+                    self.currentAttributes.backgroundColor = result.color
+                    index = result.nextIndex
+                    continue
+                }
+            default:
+                break
+            }
+
+            index += 1
+        }
+    }
+
+    private static func ansiColor(code: Int, isBright: Bool) -> MoshTerminalColor? {
+        guard let color = MoshTerminalANSIColor(rawValue: code) else {
+            return nil
+        }
+        return .ansi(color, isBright: isBright)
+    }
+
+    private static func extendedColor(
+        values: [Int],
+        startIndex: Int
+    ) -> (color: MoshTerminalColor, nextIndex: Int)? {
+        guard startIndex < values.count else {
+            return nil
+        }
+
+        switch values[startIndex] {
+        case 5:
+            guard startIndex + 1 < values.count,
+                  let index = UInt8(exactly: values[startIndex + 1]) else {
+                return nil
+            }
+            return (.indexed(index), startIndex + 2)
+        case 2:
+            guard startIndex + 3 < values.count,
+                  let red = UInt8(exactly: values[startIndex + 1]),
+                  let green = UInt8(exactly: values[startIndex + 2]),
+                  let blue = UInt8(exactly: values[startIndex + 3]) else {
+                return nil
+            }
+            return (.rgb(red: red, green: green, blue: blue), startIndex + 4)
+        default:
+            return nil
         }
     }
 
