@@ -109,6 +109,7 @@ public struct MoshTerminalScreen: Sendable {
     private var escapeState: EscapeState?
     private var wrapPending: Bool
     private var tabStops: Set<Int>
+    private var originMode: Bool
 
     public init(dimensions: MoshTerminalDimensions) {
         self.dimensions = dimensions
@@ -123,6 +124,7 @@ public struct MoshTerminalScreen: Sendable {
         self.escapeState = nil
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(dimensions.columns))
+        self.originMode = false
     }
 
     public var snapshot: MoshTerminalScreenSnapshot {
@@ -504,7 +506,7 @@ public struct MoshTerminalScreen: Sendable {
         }
 
         self.scrollRegion = MoshTerminalScrollRegion(top: top, bottom: bottom)
-        self.cursor = MoshTerminalCursor(row: 0, column: 0)
+        self.homeCursor()
         self.wrapPending = false
     }
 
@@ -531,6 +533,9 @@ public struct MoshTerminalScreen: Sendable {
 
     private mutating func setPrivateMode(_ mode: Int, enabled: Bool) {
         switch mode {
+        case 6:
+            self.originMode = enabled
+            self.homeCursor()
         case 47, 1047:
             if enabled {
                 self.activateAlternateScreen(clear: false, saveCursor: false)
@@ -713,22 +718,18 @@ public struct MoshTerminalScreen: Sendable {
         case UInt8(ascii: "D"):
             self.moveCursor(rowDelta: 0, columnDelta: -Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "E"):
-            self.setCursor(
-                row: self.cursor.row + Self.parameter(values, at: 0, default: 1),
-                column: 0
-            )
+            self.moveCursor(rowDelta: Self.parameter(values, at: 0, default: 1), columnDelta: 0)
+            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
         case UInt8(ascii: "F"):
-            self.setCursor(
-                row: self.cursor.row - Self.parameter(values, at: 0, default: 1),
-                column: 0
-            )
+            self.moveCursor(rowDelta: -Self.parameter(values, at: 0, default: 1), columnDelta: 0)
+            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
         case UInt8(ascii: "G"):
             self.setCursor(
                 row: self.cursor.row,
                 column: Self.parameter(values, at: 0, default: 1) - 1
             )
         case UInt8(ascii: "H"), UInt8(ascii: "f"):
-            self.setCursor(
+            self.setPositionedCursor(
                 row: Self.parameter(values, at: 0, default: 1) - 1,
                 column: Self.parameter(values, at: 1, default: 1) - 1
             )
@@ -760,7 +761,7 @@ public struct MoshTerminalScreen: Sendable {
         case UInt8(ascii: "a"):
             self.moveCursor(rowDelta: 0, columnDelta: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "d"):
-            self.setCursor(
+            self.setPositionedCursor(
                 row: Self.parameter(values, at: 0, default: 1) - 1,
                 column: self.cursor.column
             )
@@ -796,13 +797,16 @@ public struct MoshTerminalScreen: Sendable {
         self.escapeState = nil
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(self.dimensions.columns))
+        self.originMode = false
     }
 
     private mutating func moveCursor(rowDelta: Int, columnDelta: Int) {
-        self.setCursor(
-            row: self.cursor.row + rowDelta,
-            column: self.cursor.column + columnDelta
+        let rowBounds = self.relativeCursorRowBounds
+        self.cursor = MoshTerminalCursor(
+            row: min(max(self.cursor.row + rowDelta, rowBounds.lowerBound), rowBounds.upperBound),
+            column: min(max(self.cursor.column + columnDelta, 0), self.maximumColumn)
         )
+        self.wrapPending = false
     }
 
     private mutating func setCursor(row: Int, column: Int) {
@@ -811,6 +815,38 @@ public struct MoshTerminalScreen: Sendable {
             column: min(max(column, 0), self.maximumColumn)
         )
         self.wrapPending = false
+    }
+
+    private mutating func setPositionedCursor(row: Int, column: Int) {
+        let rowBounds = self.absoluteCursorRowBounds
+        let absoluteRow = self.originMode ? self.scrollRegion.top + row : row
+        self.cursor = MoshTerminalCursor(
+            row: min(max(absoluteRow, rowBounds.lowerBound), rowBounds.upperBound),
+            column: min(max(column, 0), self.maximumColumn)
+        )
+        self.wrapPending = false
+    }
+
+    private mutating func homeCursor() {
+        self.cursor = MoshTerminalCursor(
+            row: self.originMode ? self.scrollRegion.top : 0,
+            column: 0
+        )
+        self.wrapPending = false
+    }
+
+    private var absoluteCursorRowBounds: ClosedRange<Int> {
+        if self.originMode {
+            return self.scrollRegion.range
+        }
+        return 0...self.maximumRow
+    }
+
+    private var relativeCursorRowBounds: ClosedRange<Int> {
+        if self.scrollRegion.contains(row: self.cursor.row) {
+            return self.scrollRegion.range
+        }
+        return 0...self.maximumRow
     }
 
     private mutating func moveForwardTabStops(count: Int) {

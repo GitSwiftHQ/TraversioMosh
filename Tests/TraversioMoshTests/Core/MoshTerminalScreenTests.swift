@@ -185,6 +185,86 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func originModePositionsCursorRelativeToScrollRegion() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4r\u{1b}[?6h\u{1b}[1;2HX\u{1b}[9;5HY".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "     ",
+            " X   ",
+            "     ",
+            "    Y",
+            "     "
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 3, column: 4))
+    }
+
+    @Test
+    func disablingOriginModeRestoresViewportCursorPositioning() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4r\u{1b}[?6h\u{1b}[1;1HX\u{1b}[?6l\u{1b}[1;1HY".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "Y    ",
+            "X    ",
+            "     ",
+            "     ",
+            "     "
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func settingScrollRegionHomesCursorInsideRegionWhenOriginModeIsEnabled() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?6h\u{1b}[2;4rX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "     ",
+            "X    ",
+            "     ",
+            "     ",
+            "     "
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
+    func cursorUpDownStopAtScrollRegionMargins() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4r\u{1b}[3;3H\u{1b}[9BA\u{1b}[9AB".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "     ",
+            "   B ",
+            "     ",
+            "  A  ",
+            "     "
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 4))
+    }
+
+    @Test
+    func cursorNextAndPrecedingLineStopAtScrollRegionMargins() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4r\u{1b}[3;3H\u{1b}[9EA\u{1b}[9FB".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "     ",
+            "B    ",
+            "     ",
+            "A    ",
+            "     "
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func reverseIndexScrollsDownInsideScrollRegion() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
 
