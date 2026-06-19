@@ -114,6 +114,7 @@ public struct MoshTerminalScreen: Sendable {
     private var tabStops: Set<Int>
     private var originMode: Bool
     private var autoWrapMode: Bool
+    private var insertMode: Bool
     private var isCursorVisible: Bool
 
     public init(dimensions: MoshTerminalDimensions) {
@@ -131,6 +132,7 @@ public struct MoshTerminalScreen: Sendable {
         self.tabStops = Self.defaultTabStops(columnCount: Int(dimensions.columns))
         self.originMode = false
         self.autoWrapMode = true
+        self.insertMode = false
         self.isCursorVisible = true
     }
 
@@ -283,6 +285,10 @@ public struct MoshTerminalScreen: Sendable {
             } else {
                 displayWidth = self.availableColumnsFromCursor
             }
+        }
+
+        if self.insertMode {
+            self.insertCharacters(count: displayWidth)
         }
 
         self.clearCellForWrite(row: self.cursor.row, column: self.cursor.column)
@@ -617,6 +623,15 @@ public struct MoshTerminalScreen: Sendable {
         }
     }
 
+    private mutating func setMode(_ mode: Int, enabled: Bool) {
+        switch mode {
+        case 4:
+            self.insertMode = enabled
+        default:
+            break
+        }
+    }
+
     private mutating func activateAlternateScreen(clear: Bool, saveCursor: Bool) {
         if saveCursor {
             self.saveCursorState()
@@ -830,10 +845,14 @@ public struct MoshTerminalScreen: Sendable {
         case UInt8(ascii: "h"):
             if isPrivate {
                 values.compactMap { $0 }.forEach { self.setPrivateMode($0, enabled: true) }
+            } else {
+                values.compactMap { $0 }.forEach { self.setMode($0, enabled: true) }
             }
         case UInt8(ascii: "l"):
             if isPrivate {
                 values.compactMap { $0 }.forEach { self.setPrivateMode($0, enabled: false) }
+            } else {
+                values.compactMap { $0 }.forEach { self.setMode($0, enabled: false) }
             }
         case UInt8(ascii: "m"):
             self.applySGR(parameters: values)
@@ -857,6 +876,7 @@ public struct MoshTerminalScreen: Sendable {
         self.tabStops = Self.defaultTabStops(columnCount: Int(self.dimensions.columns))
         self.originMode = false
         self.autoWrapMode = true
+        self.insertMode = false
         self.isCursorVisible = true
     }
 

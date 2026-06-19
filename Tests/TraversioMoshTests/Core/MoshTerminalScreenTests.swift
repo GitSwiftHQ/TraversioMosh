@@ -198,6 +198,49 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func insertModeShiftsCellsBeforePrinting() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}[1;3H\u{1b}[4hXY".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abXYcd"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+    }
+
+    @Test
+    func disablingInsertModeRestoresReplacementPrinting() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}[1;3H\u{1b}[4hX\u{1b}[4lY".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abXYde"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+    }
+
+    @Test
+    func resetRestoresReplacementPrintingMode() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[4h\u{1b}cabcd\u{1b}[1;2HX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["aXcd"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func insertModePreservesWideScalarContinuationsWhileShifting() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 7, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A中BC\u{1b}[1;2H\u{1b}[4hX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AX中 BC "])
+        #expect(screen.snapshot.rows[0][2].contents == "中")
+        #expect(screen.snapshot.rows[0][2].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][3].isContinuation == true)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func csiDeleteCharactersShiftsCurrentLineLeft() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
 
