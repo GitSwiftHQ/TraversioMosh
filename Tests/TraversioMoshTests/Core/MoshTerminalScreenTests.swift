@@ -70,6 +70,46 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func csiInsertCharactersShiftsCurrentLineRight() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}[1;3H\u{1b}[2@".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["ab  cd"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func csiDeleteCharactersShiftsCurrentLineLeft() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}[1;3H\u{1b}[2P".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abef  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func csiEraseCharactersBlanksCurrentLineWithoutShifting() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}[1;3H\u{1b}[3X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["ab   f"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func csiIntermediateSequenceDoesNotDispatchBaseFinalByte() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcde\u{1b}[1;3H\u{1b}[ X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abcde"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func csiEraseScreenDoesNotPrintEscapePayload() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
 
@@ -281,6 +321,42 @@ struct MoshTerminalScreenTests {
         #expect(screen.snapshot.rows[0][0].displayWidth == 1)
         #expect(screen.snapshot.rows[0][0].isContinuation == false)
         #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 0))
+    }
+
+    @Test
+    func insertCharactersPreservesShiftedWideScalarContinuations() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A中B\u{1b}[1;2H\u{1b}[@".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A 中 B "])
+        #expect(screen.snapshot.rows[0][2].contents == "中")
+        #expect(screen.snapshot.rows[0][2].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][3].isContinuation == true)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func deleteCharactersCanRemoveWideScalarWithoutLeavingContinuation() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A中B\u{1b}[1;2H\u{1b}[2P".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB    "])
+        #expect(screen.snapshot.rows[0][2].isContinuation == false)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func eraseCharactersClearsIntersectedWideScalar() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A中B\u{1b}[1;3H\u{1b}[X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A  B  "])
+        #expect(screen.snapshot.rows[0][1].isContinuation == false)
+        #expect(screen.snapshot.rows[0][2].isContinuation == false)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
     }
 
     @Test

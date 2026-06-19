@@ -238,7 +238,7 @@ public struct MoshTerminalScreen: Sendable {
             case 0x8d:
                 self.reverseIndex()
             case 0x9b:
-                self.escapeState = .csi("")
+                self.escapeState = .csi(CSIState())
                 self.wrapPending = false
             default:
                 break
@@ -428,6 +428,57 @@ public struct MoshTerminalScreen: Sendable {
         self.wrapPending = false
     }
 
+    private mutating func insertCharacters(count: Int) {
+        let amount = min(max(count, 0), self.availableColumnsFromCursor)
+        guard amount > 0 else {
+            return
+        }
+
+        if self.rows[self.cursor.row][self.cursor.column].isContinuation {
+            self.clearCellForWrite(row: self.cursor.row, column: self.cursor.column)
+        }
+
+        var row = self.rows[self.cursor.row]
+        if self.cursor.column + amount <= self.maximumColumn {
+            for column in stride(
+                from: self.maximumColumn,
+                through: self.cursor.column + amount,
+                by: -1
+            ) {
+                row[column] = row[column - amount]
+            }
+        }
+        for column in self.cursor.column..<(self.cursor.column + amount) {
+            row[column] = .blank
+        }
+        Self.normalizeContinuations(in: &row)
+        self.rows[self.cursor.row] = row
+        self.wrapPending = false
+    }
+
+    private mutating func deleteCharacters(count: Int) {
+        let amount = min(max(count, 0), self.availableColumnsFromCursor)
+        guard amount > 0 else {
+            return
+        }
+
+        self.clearCellForWrite(row: self.cursor.row, column: self.cursor.column)
+
+        var row = self.rows[self.cursor.row]
+        let tailStart = self.cursor.column + amount
+        if tailStart <= self.maximumColumn {
+            for column in self.cursor.column...(self.maximumColumn - amount) {
+                row[column] = row[column + amount]
+            }
+        }
+        for column in (self.maximumColumn - amount + 1)...self.maximumColumn {
+            row[column] = .blank
+        }
+        Self.normalizeContinuations(in: &row)
+        self.rows[self.cursor.row] = row
+        self.wrapPending = false
+    }
+
     private mutating func replaceRows(
         in range: ClosedRange<Int>,
         with replacement: [[MoshTerminalCell]]
@@ -565,7 +616,7 @@ public struct MoshTerminalScreen: Sendable {
 
         switch (state, token) {
         case (.escape, .scalar("[")):
-            self.escapeState = .csi("")
+            self.escapeState = .csi(CSIState())
         case (.escape, .scalar("7")):
             self.saveCursorState()
             self.escapeState = nil
@@ -585,11 +636,11 @@ public struct MoshTerminalScreen: Sendable {
         case (.escape, .scalar("c")):
             self.reset()
         case (.escape, .control(.c1(0x9b))):
-            self.escapeState = .csi("")
+            self.escapeState = .csi(CSIState())
         case (.escape, _):
             self.escapeState = nil
-        case (.csi(let parameters), .scalar(let scalar)):
-            self.consumeCSI(scalar: scalar, parameters: parameters)
+        case (.csi(let csiState), .scalar(let scalar)):
+            self.consumeCSI(scalar: scalar, state: csiState)
         case (.csi, .control(.escape)):
             self.escapeState = .escape
         case (.csi, _):
@@ -597,27 +648,40 @@ public struct MoshTerminalScreen: Sendable {
         }
     }
 
-    private mutating func consumeCSI(scalar: Unicode.Scalar, parameters: String) {
+    private mutating func consumeCSI(scalar: Unicode.Scalar, state: CSIState) {
         guard let byte = UInt8(exactly: scalar.value) else {
             self.escapeState = nil
             return
         }
 
         if (0x30...0x3f).contains(byte) {
-            guard parameters.count < 64 else {
+            guard state.intermediates.isEmpty, state.parameters.count < 64 else {
                 self.escapeState = nil
                 return
             }
-            self.escapeState = .csi(parameters + String(scalar))
+            var nextState = state
+            nextState.parameters += String(scalar)
+            self.escapeState = .csi(nextState)
             return
         }
 
         if (0x20...0x2f).contains(byte) {
+            guard state.intermediates.count < 4 else {
+                self.escapeState = nil
+                return
+            }
+            var nextState = state
+            nextState.intermediates += String(scalar)
+            self.escapeState = .csi(nextState)
             return
         }
 
         if (0x40...0x7e).contains(byte) {
-            self.executeCSI(finalByte: byte, parameters: parameters)
+            self.executeCSI(
+                finalByte: byte,
+                parameters: state.parameters,
+                intermediates: state.intermediates
+            )
             self.escapeState = nil
             return
         }
@@ -625,11 +689,17 @@ public struct MoshTerminalScreen: Sendable {
         self.escapeState = nil
     }
 
-    private mutating func executeCSI(finalByte: UInt8, parameters: String) {
+    private mutating func executeCSI(finalByte: UInt8, parameters: String, intermediates: String) {
+        guard intermediates.isEmpty else {
+            return
+        }
+
         let values = Self.parseCSIParameters(parameters)
         let isPrivate = parameters.first == "?"
 
         switch finalByte {
+        case UInt8(ascii: "@"):
+            self.insertCharacters(count: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "A"):
             self.moveCursor(rowDelta: -Self.parameter(values, at: 0, default: 1), columnDelta: 0)
         case UInt8(ascii: "B"):
@@ -656,10 +726,14 @@ public struct MoshTerminalScreen: Sendable {
             self.insertLines(count: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "M"):
             self.deleteLines(count: Self.parameter(values, at: 0, default: 1))
+        case UInt8(ascii: "P"):
+            self.deleteCharacters(count: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "S"):
             self.scrollUp(count: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "T"):
             self.scrollDown(count: Self.parameter(values, at: 0, default: 1))
+        case UInt8(ascii: "X"):
+            self.eraseCharacters(count: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "h"):
             if isPrivate {
                 values.compactMap { $0 }.forEach { self.setPrivateMode($0, enabled: true) }
@@ -735,6 +809,19 @@ public struct MoshTerminalScreen: Sendable {
         default:
             break
         }
+        self.wrapPending = false
+    }
+
+    private mutating func eraseCharacters(count: Int) {
+        let amount = min(max(count, 0), self.availableColumnsFromCursor)
+        guard amount > 0 else {
+            return
+        }
+
+        self.blankCells(
+            row: self.cursor.row,
+            columns: self.cursor.column...(self.cursor.column + amount - 1)
+        )
         self.wrapPending = false
     }
 
@@ -937,7 +1024,12 @@ public struct MoshTerminalScreen: Sendable {
 
 private enum EscapeState: Equatable, Sendable {
     case escape
-    case csi(String)
+    case csi(CSIState)
+}
+
+private struct CSIState: Equatable, Sendable {
+    var parameters: String = ""
+    var intermediates: String = ""
 }
 
 private struct MoshTerminalScrollRegion: Equatable, Sendable {
