@@ -255,9 +255,106 @@ struct MoshTerminalScreenTests {
     func unsupportedHashEscapeFinalDoesNotRenderFinalByte() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
-        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}#6B".utf8)))
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}#9B".utf8)))
 
         #expect(screen.snapshot.lineStrings == ["AB "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func decLineRenditionSequencesUpdateCurrentRows() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}#3\n\u{1b}#4\n\u{1b}#5\n\u{1b}#6".utf8)))
+
+        #expect(screen.snapshot.lineRenditions == [
+            .doubleHeightTop,
+            .doubleHeightBottom,
+            .singleWidth,
+            .doubleWidth
+        ])
+    }
+
+    @Test
+    func decDoubleWidthLineDiscardsRightHalfAndClampsCursor() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}[1;6H\u{1b}#6X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abX   "])
+        #expect(screen.snapshot.lineRenditions == [.doubleWidth])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func decSingleWidthLineRestoresFullWidthCapacityWithoutRestoringDiscardedCells() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}#6\u{1b}#5\u{1b}[1;6HZ".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abc  Z"])
+        #expect(screen.snapshot.lineRenditions == [.singleWidth])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 5))
+    }
+
+    @Test
+    func decLineRenditionsMoveWithScrolledRowsAndNewRowsAreSingleWidth() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 3))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}#6\n\u{1b}#3\u{1b}[3;1H\n".utf8)))
+
+        #expect(screen.snapshot.lineRenditions == [
+            .doubleHeightTop,
+            .singleWidth,
+            .singleWidth
+        ])
+    }
+
+    @Test
+    func alternateScreenPreservesLineRenditionsSeparately() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}#6\u{1b}[?1049h\u{1b}#3\u{1b}[?1049l".utf8)))
+
+        #expect(screen.snapshot.lineRenditions == [
+            .doubleWidth,
+            .singleWidth
+        ])
+    }
+
+    @Test
+    func resetAndScreenAlignmentRestoreSingleWidthLines() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}#6\n\u{1b}#3\u{1b}#8".utf8)))
+
+        #expect(screen.snapshot.lineRenditions == [.singleWidth, .singleWidth])
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}#6\u{1b}c".utf8)))
+
+        #expect(screen.snapshot.lineRenditions == [.singleWidth, .singleWidth])
+    }
+
+    @Test
+    func resizePreservesLineRenditionsAndReclampsDoubleWidthCursor() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}[1;3H\u{1b}#6".utf8)))
+        screen.resize(try MoshTerminalDimensions(columns: 4, rows: 2))
+
+        #expect(screen.snapshot.lineStrings == ["ab  ", "    "])
+        #expect(screen.snapshot.lineRenditions == [.doubleWidth, .singleWidth])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func savedCursorRestoreReclampsToDoubleWidthLine() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcdef\u{1b}[1;6H\u{1b}7\u{1b}#6\u{1b}8X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abX   "])
+        #expect(screen.snapshot.lineRenditions == [.doubleWidth])
         #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
     }
 
