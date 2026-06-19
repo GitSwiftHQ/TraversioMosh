@@ -11,6 +11,7 @@ public enum MoshPacketDirection: UInt8, Sendable {
 public enum MoshPacketNonceError: Error, Equatable, Sendable {
     case sequenceOutOfRange(UInt64)
     case invalidRawByteCount(Int)
+    case invalidDatagramByteCount(Int)
     case invalidPrefix([UInt8])
 }
 
@@ -22,6 +23,9 @@ public struct MoshPacketNonce: Equatable, Sendable {
     public let rawBytes: [UInt8]
     public let sequence: UInt64
     public let direction: MoshPacketDirection
+    public var datagramBytes: [UInt8] {
+        Array(self.rawBytes.suffix(8))
+    }
 
     public init(sequence: UInt64, direction: MoshPacketDirection) throws {
         guard sequence <= Self.sequenceMask else {
@@ -52,6 +56,14 @@ public struct MoshPacketNonce: Equatable, Sendable {
         self.rawBytes = bytes
         self.sequence = value & Self.sequenceMask
         self.direction = (value & Self.directionMask) == 0 ? .toServer : .toClient
+    }
+
+    public init(datagramBytes: some Collection<UInt8>) throws {
+        let bytes = Array(datagramBytes)
+        guard bytes.count == 8 else {
+            throw MoshPacketNonceError.invalidDatagramByteCount(bytes.count)
+        }
+        try self.init(rawBytes: [0, 0, 0, 0] + bytes)
     }
 
     private static func rawBytes(for value: UInt64) -> [UInt8] {
