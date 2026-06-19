@@ -258,6 +258,10 @@ public struct MoshTerminalScreen: Sendable {
             return
         }
 
+        if self.appendGraphemeClusterContinuation(scalar, width: scalarWidth) {
+            return
+        }
+
         if self.wrapPending {
             self.index()
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
@@ -316,6 +320,41 @@ public struct MoshTerminalScreen: Sendable {
 
         let column = self.leadingColumn(row: self.cursor.row, column: targetColumn)
         self.rows[self.cursor.row][column] = self.rows[self.cursor.row][column].appending(scalar)
+    }
+
+    private mutating func appendGraphemeClusterContinuation(
+        _ scalar: Unicode.Scalar,
+        width: MoshTerminalScalarWidth
+    ) -> Bool {
+        guard width == .wide,
+              let column = self.activeGraphemeClusterColumn(),
+              self.rows[self.cursor.row][column].contents.unicodeScalars.last?.value == 0x200d else {
+            return false
+        }
+
+        self.rows[self.cursor.row][column] = self.rows[self.cursor.row][column].appending(scalar)
+        return true
+    }
+
+    private func activeGraphemeClusterColumn() -> Int? {
+        guard self.rows.indices.contains(self.cursor.row) else {
+            return nil
+        }
+
+        let targetColumn: Int
+        if self.wrapPending {
+            targetColumn = self.cursor.column
+        } else if self.cursor.column > 0 {
+            targetColumn = self.cursor.column - 1
+        } else {
+            targetColumn = self.cursor.column
+        }
+
+        guard self.rows[self.cursor.row].indices.contains(targetColumn) else {
+            return nil
+        }
+
+        return self.leadingColumn(row: self.cursor.row, column: targetColumn)
     }
 
     private mutating func clearCellForWrite(row: Int, column: Int) {

@@ -475,6 +475,46 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func emojiModifierAttachesToPreviousEmojiCell() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("👍🏽X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["👍🏽 X  "])
+        #expect(screen.snapshot.rows[0][0].contents == "👍🏽")
+        #expect(screen.snapshot.rows[0][0].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][1].isContinuation == true)
+        #expect(screen.snapshot.rows[0][2].contents == "X")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+    }
+
+    @Test
+    func zwjEmojiClusterUsesOneWideCell() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("👩‍💻X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["👩‍💻 X  "])
+        #expect(screen.snapshot.rows[0][0].contents == "👩‍💻")
+        #expect(screen.snapshot.rows[0][0].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][1].isContinuation == true)
+        #expect(screen.snapshot.rows[0][2].contents == "X")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+    }
+
+    @Test
+    func zwjEmojiClusterPreservesDeferredWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("👩‍💻X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["👩‍💻 ", "X "])
+        #expect(screen.snapshot.rows[0][0].contents == "👩‍💻")
+        #expect(screen.snapshot.rows[0][1].isContinuation == true)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func wideScalarWrapsBeforeRightEdgeWhenItCannotFit() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
 
