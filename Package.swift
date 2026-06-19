@@ -64,6 +64,7 @@ let package = Package(
             dependencies: [
                 "TraversioMoshBootstrap",
                 "TraversioMoshCrypto",
+                "TraversioMoshWire",
             ]
         ),
     ]
