@@ -59,5 +59,12 @@ let package = Package(
                 "TraversioMoshWire",
             ]
         ),
+        .testTarget(
+            name: "TraversioMoshTests",
+            dependencies: [
+                "TraversioMoshBootstrap",
+                "TraversioMoshCrypto",
+            ]
+        ),
     ]
 )
