@@ -150,7 +150,7 @@ struct MoshSSPInMemoryLoopTests {
 
 private func deliver<Packets: Sequence>(
     _ packets: Packets,
-    to loop: inout MoshSSPInMemoryLoop<ByteState>,
+    to loop: inout MoshSSPInMemoryLoop<ByteState, ByteState>,
     nowMilliseconds: UInt64,
     sourceLocation: SourceLocation = #_sourceLocation
 ) throws -> MoshSSPIncomingInstructionResult<ByteState> where Packets.Element == MoshSSPOutgoingPacket {

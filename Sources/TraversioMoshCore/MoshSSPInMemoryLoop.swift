@@ -31,22 +31,22 @@ public struct MoshSSPOutgoingBatch: Equatable, Sendable {
     }
 }
 
-public enum MoshSSPIncomingPacketResult<State: MoshSynchronizedState>: Equatable, Sendable {
+public enum MoshSSPIncomingPacketResult<ReceiveState: MoshSynchronizedState>: Equatable, Sendable {
     case incompleteFragment
-    case instruction(MoshSSPIncomingInstructionResult<State>)
+    case instruction(MoshSSPIncomingInstructionResult<ReceiveState>)
 }
 
-public struct MoshSSPIncomingInstructionResult<State: MoshSynchronizedState>: Equatable, Sendable {
+public struct MoshSSPIncomingInstructionResult<ReceiveState: MoshSynchronizedState>: Equatable, Sendable {
     public let instruction: MoshTransportInstruction
     public let receiveResult: MoshSSPReceiveResult
     public let acknowledgementNumber: UInt64
-    public let latestState: MoshNumberedState<State>
+    public let latestState: MoshNumberedState<ReceiveState>
 
     public init(
         instruction: MoshTransportInstruction,
         receiveResult: MoshSSPReceiveResult,
         acknowledgementNumber: UInt64,
-        latestState: MoshNumberedState<State>
+        latestState: MoshNumberedState<ReceiveState>
     ) {
         self.instruction = instruction
         self.receiveResult = receiveResult
@@ -55,9 +55,12 @@ public struct MoshSSPIncomingInstructionResult<State: MoshSynchronizedState>: Eq
     }
 }
 
-public struct MoshSSPInMemoryLoop<State: MoshSynchronizedState>: Sendable {
-    public private(set) var scheduler: MoshSSPSendScheduler<State>
-    public private(set) var receiver: MoshSSPReceiver<State>
+public struct MoshSSPInMemoryLoop<
+    SendState: MoshSynchronizedState,
+    ReceiveState: MoshSynchronizedState
+>: Sendable {
+    public private(set) var scheduler: MoshSSPSendScheduler<SendState>
+    public private(set) var receiver: MoshSSPReceiver<ReceiveState>
 
     private var fragmenter: MoshFragmenter
     private var assembly: MoshFragmentAssembly
@@ -65,8 +68,8 @@ public struct MoshSSPInMemoryLoop<State: MoshSynchronizedState>: Sendable {
     private var lastReceivedTimestamp: UInt16
 
     public init(
-        initialSendState: State,
-        initialReceiveState: State,
+        initialSendState: SendState,
+        initialReceiveState: ReceiveState,
         initialNowMilliseconds: UInt64 = 0,
         timing: MoshSSPSendTimingConfiguration = MoshSSPSendTimingConfiguration(),
         maximumSerializedFragmentByteCount: Int = 1_280,
@@ -85,7 +88,7 @@ public struct MoshSSPInMemoryLoop<State: MoshSynchronizedState>: Sendable {
         self.lastReceivedTimestamp = 0
     }
 
-    public var latestReceivedState: MoshNumberedState<State> {
+    public var latestReceivedState: MoshNumberedState<ReceiveState> {
         self.receiver.latestState
     }
 
@@ -101,7 +104,7 @@ public struct MoshSSPInMemoryLoop<State: MoshSynchronizedState>: Sendable {
         self.scheduler.shutdownAcknowledged
     }
 
-    public mutating func setCurrentState(_ state: State, nowMilliseconds: UInt64) {
+    public mutating func setCurrentState(_ state: SendState, nowMilliseconds: UInt64) {
         self.scheduler.setCurrentState(state, nowMilliseconds: nowMilliseconds)
     }
 
@@ -152,7 +155,7 @@ public struct MoshSSPInMemoryLoop<State: MoshSynchronizedState>: Sendable {
     public mutating func receive(
         _ packet: MoshPacketPlaintext,
         nowMilliseconds: UInt64
-    ) throws -> MoshSSPIncomingPacketResult<State> {
+    ) throws -> MoshSSPIncomingPacketResult<ReceiveState> {
         self.lastReceivedTimestamp = packet.timestamp
         self.scheduler.noteRemoteHeard(nowMilliseconds: nowMilliseconds)
 
@@ -188,7 +191,7 @@ public struct MoshSSPInMemoryLoop<State: MoshSynchronizedState>: Sendable {
     public mutating func receive(
         serializedPacket: [UInt8],
         nowMilliseconds: UInt64
-    ) throws -> MoshSSPIncomingPacketResult<State> {
+    ) throws -> MoshSSPIncomingPacketResult<ReceiveState> {
         let packet = try MoshPacketPlaintext(serializedBytes: serializedPacket)
         return try self.receive(packet, nowMilliseconds: nowMilliseconds)
     }

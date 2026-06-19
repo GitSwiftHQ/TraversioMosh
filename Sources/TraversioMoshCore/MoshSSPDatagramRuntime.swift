@@ -48,15 +48,15 @@ public struct MoshSSPDatagramOutgoingBatch: Equatable, Sendable {
     }
 }
 
-public struct MoshSSPDatagramIncomingInstruction<State: MoshSynchronizedState>: Equatable, Sendable {
+public struct MoshSSPDatagramIncomingInstruction<ReceiveState: MoshSynchronizedState>: Equatable, Sendable {
     public let receivedDatagram: MoshReceivedDatagram
     public let packet: MoshPacketPlaintext
-    public let instructionResult: MoshSSPIncomingInstructionResult<State>
+    public let instructionResult: MoshSSPIncomingInstructionResult<ReceiveState>
 
     public init(
         receivedDatagram: MoshReceivedDatagram,
         packet: MoshPacketPlaintext,
-        instructionResult: MoshSSPIncomingInstructionResult<State>
+        instructionResult: MoshSSPIncomingInstructionResult<ReceiveState>
     ) {
         self.receivedDatagram = receivedDatagram
         self.packet = packet
@@ -64,15 +64,18 @@ public struct MoshSSPDatagramIncomingInstruction<State: MoshSynchronizedState>: 
     }
 }
 
-public enum MoshSSPDatagramIncomingPacketResult<State: MoshSynchronizedState>: Equatable, Sendable {
+public enum MoshSSPDatagramIncomingPacketResult<ReceiveState: MoshSynchronizedState>: Equatable, Sendable {
     case replayedDatagram(MoshReceivedDatagram)
     case incompleteFragment(receivedDatagram: MoshReceivedDatagram, packet: MoshPacketPlaintext)
-    case instruction(MoshSSPDatagramIncomingInstruction<State>)
+    case instruction(MoshSSPDatagramIncomingInstruction<ReceiveState>)
 }
 
-public actor MoshSSPDatagramRuntime<State: MoshSynchronizedState> {
+public actor MoshSSPDatagramRuntime<
+    SendState: MoshSynchronizedState,
+    ReceiveState: MoshSynchronizedState
+> {
     public typealias IncomingInstructionStream = AsyncThrowingStream<
-        MoshSSPDatagramIncomingInstruction<State>,
+        MoshSSPDatagramIncomingInstruction<ReceiveState>,
         Error
     >
 
@@ -81,14 +84,14 @@ public actor MoshSSPDatagramRuntime<State: MoshSynchronizedState> {
     private let link: any MoshDatagramLink
     private let clock: any MoshMillisecondsClock
     private let incomingContinuation: IncomingInstructionStream.Continuation
-    private var loop: MoshSSPInMemoryLoop<State>
+    private var loop: MoshSSPInMemoryLoop<SendState, ReceiveState>
     private var sequencer: MoshDatagramSequencer
     private var receiveTask: Task<Void, Never>?
     private var isStarted = false
     private var isStopped = false
 
     public init(
-        loop: MoshSSPInMemoryLoop<State>,
+        loop: MoshSSPInMemoryLoop<SendState, ReceiveState>,
         sequencer: MoshDatagramSequencer,
         link: any MoshDatagramLink,
         clock: any MoshMillisecondsClock = MoshSystemMillisecondsClock(),
@@ -132,7 +135,7 @@ public actor MoshSSPDatagramRuntime<State: MoshSynchronizedState> {
         self.incomingContinuation.finish()
     }
 
-    public func setCurrentState(_ state: State) async {
+    public func setCurrentState(_ state: SendState) async {
         let nowMilliseconds = await self.clock.nowMilliseconds()
         self.loop.setCurrentState(state, nowMilliseconds: nowMilliseconds)
     }
@@ -175,7 +178,7 @@ public actor MoshSSPDatagramRuntime<State: MoshSynchronizedState> {
     @discardableResult
     public func receiveDatagram(
         _ datagram: [UInt8]
-    ) async throws -> MoshSSPDatagramIncomingPacketResult<State> {
+    ) async throws -> MoshSSPDatagramIncomingPacketResult<ReceiveState> {
         try self.requireStarted()
 
         let receivedDatagram = try self.sequencer.open(datagram: datagram)
@@ -203,7 +206,7 @@ public actor MoshSSPDatagramRuntime<State: MoshSynchronizedState> {
         }
     }
 
-    public func latestReceivedState() -> MoshNumberedState<State> {
+    public func latestReceivedState() -> MoshNumberedState<ReceiveState> {
         self.loop.latestReceivedState
     }
 

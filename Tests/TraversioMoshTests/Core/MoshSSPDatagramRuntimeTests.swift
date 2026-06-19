@@ -158,7 +158,7 @@ private func makeRuntime(
     clock: ManualMillisecondsClock,
     sendDirection: MoshPacketDirection,
     receiveDirection: MoshPacketDirection
-) throws -> MoshSSPDatagramRuntime<ByteState> {
+) throws -> MoshSSPDatagramRuntime<ByteState, ByteState> {
     let loop = MoshSSPInMemoryLoop(
         initialSendState: ByteState(),
         initialReceiveState: ByteState(),
