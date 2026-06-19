@@ -139,6 +139,68 @@ struct MoshSSPDatagramRuntimeTests {
             throw error
         }
     }
+
+    @Test
+    func receiveLoopDropsPacketLocalDatagramFailuresAndContinues() async throws {
+        let pair = await MoshInMemoryDatagramLink.connectedPair()
+        let clock = ManualMillisecondsClock()
+        let runtime = try makeRuntime(
+            link: pair.server,
+            clock: clock,
+            sendDirection: .toClient,
+            receiveDirection: .toServer
+        )
+        var senderLoop = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            chaffSource: .none
+        )
+        var senderSequencer = try MoshDatagramSequencer(
+            rawKey: runtimeKey,
+            sendDirection: .toServer,
+            receiveDirection: .toClient
+        )
+        let instructionTask = Task<MoshSSPDatagramIncomingInstruction<ByteState>?, Error> {
+            var iterator = runtime.incomingInstructions.makeAsyncIterator()
+            return try await iterator.next()
+        }
+
+        do {
+            try await pair.client.start()
+            try await runtime.start()
+
+            try await pair.client.send([0x01, 0x02, 0x03])
+            try await pair.client.send(try tamperedAuthenticatedDatagram())
+
+            senderLoop.setCurrentState(ByteState([0x42]), nowMilliseconds: 0)
+            let batch = try #require(try senderLoop.tick(nowMilliseconds: 20))
+            let packet = try #require(batch.packets.first)
+            let validDatagram = try senderSequencer.seal(
+                plaintext: packet.plaintext.serializedBytes()
+            )
+
+            await clock.set(20)
+            try await pair.client.send(validDatagram)
+
+            let instruction = try #require(try await withRuntimeTimeout {
+                try await instructionTask.value
+            })
+
+            #expect(instruction.instructionResult.receiveResult == .accepted(newNumber: 1))
+            #expect(instruction.instructionResult.latestState.state.bytes == [0x42])
+            #expect(await runtime.latestReceivedState().state.bytes == [0x42])
+
+            instructionTask.cancel()
+            await runtime.stop()
+            await pair.client.stop()
+        } catch {
+            instructionTask.cancel()
+            await runtime.stop()
+            await pair.client.stop()
+            throw error
+        }
+    }
 }
 
 private actor ManualMillisecondsClock: MoshMillisecondsClock {
@@ -187,6 +249,21 @@ private func requireRuntimeInstruction(
         throw RuntimeTestFailure()
     }
     return instruction
+}
+
+private func tamperedAuthenticatedDatagram() throws -> [UInt8] {
+    let cipher = try MoshDatagramCipher(rawKey: runtimeKey)
+    var datagram = try cipher.seal(
+        plaintext: MoshPacketPlaintext(
+            timestamp: 0,
+            timestampReply: 0,
+            payload: []
+        ).serializedBytes(),
+        sequence: 0,
+        direction: .toServer
+    )
+    datagram[datagram.count - 1] ^= 0x01
+    return datagram
 }
 
 private enum RuntimeTestError: Error, Equatable {

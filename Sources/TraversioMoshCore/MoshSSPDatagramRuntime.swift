@@ -240,7 +240,15 @@ public actor MoshSSPDatagramRuntime<
                     guard let self else {
                         return
                     }
-                    _ = try await self.receiveDatagram(datagram)
+                    do {
+                        _ = try await self.receiveDatagram(datagram)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        guard Self.isPacketLocalDatagramError(error) else {
+                            throw error
+                        }
+                    }
                 }
 
                 guard let self else {
@@ -258,6 +266,29 @@ public actor MoshSSPDatagramRuntime<
                 }
                 await self.finishFromReceiveTask(throwing: error)
             }
+        }
+    }
+
+    private nonisolated static func isPacketLocalDatagramError(_ error: Error) -> Bool {
+        switch error {
+        case is MoshDatagramCipherError:
+            return true
+        case let error as MoshAES128OCBError:
+            switch error {
+            case .authenticationFailed, .ciphertextTooShort:
+                return true
+            case .invalidNonceLength, .commonCrypto:
+                return false
+            }
+        case let error as MoshDatagramSequencerError:
+            switch error {
+            case .directionMismatch:
+                return true
+            case .sendSequenceExhausted:
+                return false
+            }
+        default:
+            return false
         }
     }
 
