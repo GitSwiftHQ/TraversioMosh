@@ -3,4 +3,4 @@
 // Licensed under the MIT License.
 // See LICENSE for details.
 //
-// Module placeholder. UDP transport design has not started yet.
+// Module root. Public transport types live in focused source files.

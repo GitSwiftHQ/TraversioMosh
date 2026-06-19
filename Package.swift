@@ -73,6 +73,7 @@ let package = Package(
                 "TraversioMoshBootstrap",
                 "TraversioMoshCore",
                 "TraversioMoshCrypto",
+                "TraversioMoshTransport",
                 "TraversioMoshWire",
             ]
         ),
