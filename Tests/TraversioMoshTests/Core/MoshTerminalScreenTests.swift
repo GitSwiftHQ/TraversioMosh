@@ -80,6 +80,68 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func scrollRegionConstrainsLineFeedScrolling() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("1111222233334444\u{1b}[2;3r\u{1b}[3;1H\n".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["1111", "3333", "    ", "4444"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 2, column: 0))
+    }
+
+    @Test
+    func reverseIndexScrollsDownInsideScrollRegion() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("1111222233334444\u{1b}[2;3r\u{1b}[2;1H\u{1b}M".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["1111", "    ", "2222", "4444"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 0))
+    }
+
+    @Test
+    func csiInsertAndDeleteLinesRespectScrollRegion() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("aaabbbcccdddeee\u{1b}[2;5r\u{1b}[3;1H\u{1b}[L".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["aaa", "bbb", "   ", "ccc", "ddd"])
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[M".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["aaa", "bbb", "ccc", "ddd", "   "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 2, column: 0))
+    }
+
+    @Test
+    func csiScrollUpAndDownUseConfiguredScrollRegion() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 5))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("11112222333344445555\u{1b}[2;4r\u{1b}[S".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["1111", "3333", "4444", "    ", "5555"])
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[T".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["1111", "    ", "3333", "4444", "5555"])
+    }
+
+    @Test
+    func alternateScreen1049ClearsAndRestoresNormalBufferCursorAndAttributes() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("main\u{1b}[2;3H\u{1b}[31mX\u{1b}[?1049halt\u{1b}[?1049lY".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["main", "  XY"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
+        #expect(screen.snapshot.rows[1][3].attributes.foregroundColor == .ansi(.red, isBright: false))
+    }
+
+    @Test
     func sgrAppliesStylesToNewCellsAndResetRestoresDefaults() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
