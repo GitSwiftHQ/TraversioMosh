@@ -18,9 +18,9 @@ data plane.
 ## Current Scope
 
 This repository is initialized as a standalone Swift package. It intentionally
-does not yet define public API or implementation details. API shape, module
-ownership, crypto choices, wire compatibility strategy, and validation gates
-will be designed before code is added.
+does not yet define public API or implementation details. Architecture and
+technical-selection decisions are tracked in the parent workspace while the
+package remains implementation-free.
 
 ## Products
 
@@ -37,21 +37,20 @@ will be designed before code is added.
 
 - Swift `6.2`
 - Apple platform targets declared by `Package.swift`:
-  - macOS 10.15
-  - iOS 13
-  - tvOS 13
-  - watchOS 6
+  - macOS 13
+  - iOS 16
+  - tvOS 16
+  - watchOS 9
   - visionOS 1
 
-## Next Design Topics
+## Initial Implementation Topics
 
-- Minimal public API for endpoint, session configuration, start/stop, keystroke
-  input, resize, and async host operation streaming.
-- Traversio-optional bootstrap adapter protocol.
-- UDP transport ownership and Network.framework availability policy.
-- AES-128-OCB implementation strategy and compatibility vectors.
-- SSP state numbering, ACK, throwaway, retransmit, heartbeat, and timeout model.
-- Real `mosh-server` E2E harness shape.
+- Bootstrap output parser and adapter boundary.
+- Session key validation.
+- Test infrastructure for deterministic wire, crypto, and state-machine work.
+- AES-128-OCB vectors and audit path.
+- SSP state numbering, ACK, throwaway, retransmit, heartbeat, and timeout tests.
+- Real `mosh-server` E2E harness using a locally built or containerized server.
 
 ## Reference Policy
 
