@@ -76,15 +76,18 @@ public struct MoshTerminalCell: Equatable, Sendable {
 public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
     public let dimensions: MoshTerminalDimensions
     public let cursor: MoshTerminalCursor
+    public let isCursorVisible: Bool
     public let rows: [[MoshTerminalCell]]
 
     public init(
         dimensions: MoshTerminalDimensions,
         cursor: MoshTerminalCursor,
+        isCursorVisible: Bool = true,
         rows: [[MoshTerminalCell]]
     ) {
         self.dimensions = dimensions
         self.cursor = cursor
+        self.isCursorVisible = isCursorVisible
         self.rows = rows
     }
 
@@ -111,6 +114,7 @@ public struct MoshTerminalScreen: Sendable {
     private var tabStops: Set<Int>
     private var originMode: Bool
     private var autoWrapMode: Bool
+    private var isCursorVisible: Bool
 
     public init(dimensions: MoshTerminalDimensions) {
         self.dimensions = dimensions
@@ -127,12 +131,14 @@ public struct MoshTerminalScreen: Sendable {
         self.tabStops = Self.defaultTabStops(columnCount: Int(dimensions.columns))
         self.originMode = false
         self.autoWrapMode = true
+        self.isCursorVisible = true
     }
 
     public var snapshot: MoshTerminalScreenSnapshot {
         MoshTerminalScreenSnapshot(
             dimensions: self.dimensions,
             cursor: self.cursor,
+            isCursorVisible: self.isCursorVisible,
             rows: self.rows
         )
     }
@@ -586,6 +592,8 @@ public struct MoshTerminalScreen: Sendable {
             if enabled == false {
                 self.wrapPending = false
             }
+        case 25:
+            self.isCursorVisible = enabled
         case 47, 1047:
             if enabled {
                 self.activateAlternateScreen(clear: false, saveCursor: false)
@@ -849,6 +857,7 @@ public struct MoshTerminalScreen: Sendable {
         self.tabStops = Self.defaultTabStops(columnCount: Int(self.dimensions.columns))
         self.originMode = false
         self.autoWrapMode = true
+        self.isCursorVisible = true
     }
 
     private mutating func moveCursor(rowDelta: Int, columnDelta: Int) {

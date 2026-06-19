@@ -58,6 +58,29 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func privateCursorVisibilityModeUpdatesSnapshot() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}[?25lB".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB "])
+        #expect(screen.snapshot.isCursorVisible == false)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?25h".utf8)))
+
+        #expect(screen.snapshot.isCursorVisible == true)
+    }
+
+    @Test
+    func resetRestoresCursorVisibility() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?25l\u{1b}c".utf8)))
+
+        #expect(screen.snapshot.isCursorVisible == true)
+    }
+
+    @Test
     func appliesCarriageReturnLineFeedBackspaceAndTab() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 2))
 
