@@ -752,6 +752,8 @@ public struct MoshTerminalScreen: Sendable {
             self.escapeState = .characterSetDesignation(.g0)
         case (.escape, .scalar(")")):
             self.escapeState = .characterSetDesignation(.g1)
+        case (.escape, .scalar("#")):
+            self.escapeState = .escapeHash
         case (.escape, .scalar("P")):
             self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
         case (.escape, .scalar("X")):
@@ -810,6 +812,13 @@ public struct MoshTerminalScreen: Sendable {
             self.escapeState = .escape
         case (.characterSetDesignation, _):
             self.escapeState = nil
+        case (.escapeHash, .scalar("8")):
+            self.screenAlignmentTest()
+            self.escapeState = nil
+        case (.escapeHash, .control(.escape)):
+            self.escapeState = .escape
+        case (.escapeHash, _):
+            self.escapeState = nil
         case (.stringControl(let stringState), _):
             self.consumeStringControl(token: token, state: stringState)
         }
@@ -838,6 +847,15 @@ public struct MoshTerminalScreen: Sendable {
         case .g1:
             self.g1CharacterSet = characterSet
         }
+    }
+
+    private mutating func screenAlignmentTest() {
+        self.rows = Self.alignmentRows(dimensions: self.dimensions)
+        self.cursor = MoshTerminalCursor(row: 0, column: 0)
+        self.scrollRegion = .full(rowCount: self.rows.count)
+        self.currentAttributes = .default
+        self.wrapPending = false
+        self.originMode = false
     }
 
     private mutating func consumeStringControl(
@@ -1331,6 +1349,17 @@ public struct MoshTerminalScreen: Sendable {
         }
     }
 
+    private static func alignmentRows(dimensions: MoshTerminalDimensions) -> [[MoshTerminalCell]] {
+        let cell = MoshTerminalCell(
+            scalar: "E",
+            attributes: .default,
+            displayWidth: 1
+        )
+        return (0..<Int(dimensions.rows)).map { _ in
+            Array(repeating: cell, count: Int(dimensions.columns))
+        }
+    }
+
     fileprivate static func blankRow(columnCount: Int) -> [MoshTerminalCell] {
         Array(repeating: .blank, count: columnCount)
     }
@@ -1402,6 +1431,7 @@ private enum EscapeState: Equatable, Sendable {
     case escape
     case csi(CSIState)
     case characterSetDesignation(MoshTerminalCharacterSetSlot)
+    case escapeHash
     case stringControl(StringControlState)
 }
 

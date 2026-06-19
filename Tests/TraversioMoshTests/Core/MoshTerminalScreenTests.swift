@@ -199,6 +199,69 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func decScreenAlignmentFillsCompleteScreenAndHomesCursor() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcde\u{1b}#8".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["EEE", "EEE"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 0))
+    }
+
+    @Test
+    func decScreenAlignmentClearsPendingWrapBeforeNextPrintable() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}#8X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["XEE", "EEE"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func decScreenAlignmentResetsScrollRegionToFullScreen() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;3r\u{1b}#8\u{1b}[4;1H\nX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["EEE", "EEE", "EEE", "X  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 3, column: 1))
+    }
+
+    @Test
+    func decScreenAlignmentResetsOriginModeAndRendition() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 3))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;3r\u{1b}[?6h\u{1b}[31m\u{1b}#8X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["XEE", "EEE", "EEE"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+        #expect(screen.snapshot.rows[0][0].attributes == .default)
+        #expect(screen.snapshot.rows[0][1].attributes == .default)
+    }
+
+    @Test
+    func decScreenAlignmentCanBeSplitAcrossWrites() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ab\u{1b}#".utf8)))
+        try screen.apply(MoshTerminalOutput(bytes: Array("8".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["EE", "EE"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 0))
+    }
+
+    @Test
+    func unsupportedHashEscapeFinalDoesNotRenderFinalByte() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}#6B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func appliesCarriageReturnLineFeedBackspaceAndTab() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 2))
 
