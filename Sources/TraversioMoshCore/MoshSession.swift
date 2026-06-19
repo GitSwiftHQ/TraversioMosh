@@ -22,11 +22,25 @@ public protocol MoshSessionTransportFactory: Sendable {
     func makeDatagramLink(for endpoint: MoshEndpoint) async throws -> any MoshDatagramLink
 }
 
+public protocol MoshSessionTimer: Sendable {
+    func sleep(forMilliseconds milliseconds: UInt64) async throws
+}
+
+public struct MoshTaskSessionTimer: MoshSessionTimer {
+    public init() {}
+
+    public func sleep(forMilliseconds milliseconds: UInt64) async throws {
+        let clampedMilliseconds = min(milliseconds, UInt64(Int64.max))
+        try await Task.sleep(for: .milliseconds(Int64(clampedMilliseconds)))
+    }
+}
+
 public struct MoshSessionConfiguration: Sendable {
     public var endpoint: MoshEndpoint
     public var initialTerminalDimensions: MoshTerminalDimensions
     public var transportFactory: any MoshSessionTransportFactory
     public var clock: any MoshMillisecondsClock
+    public var timer: any MoshSessionTimer
     public var timing: MoshSSPSendTimingConfiguration
     public var maximumSerializedFragmentByteCount: Int
     public var chaffSource: MoshSSPChaffSource
@@ -36,6 +50,7 @@ public struct MoshSessionConfiguration: Sendable {
         initialTerminalDimensions: MoshTerminalDimensions,
         transportFactory: any MoshSessionTransportFactory,
         clock: any MoshMillisecondsClock = MoshSystemMillisecondsClock(),
+        timer: any MoshSessionTimer = MoshTaskSessionTimer(),
         timing: MoshSSPSendTimingConfiguration = MoshSSPSendTimingConfiguration(),
         maximumSerializedFragmentByteCount: Int = 1_280,
         chaffSource: MoshSSPChaffSource = .random
@@ -44,6 +59,7 @@ public struct MoshSessionConfiguration: Sendable {
         self.initialTerminalDimensions = initialTerminalDimensions
         self.transportFactory = transportFactory
         self.clock = clock
+        self.timer = timer
         self.timing = timing
         self.maximumSerializedFragmentByteCount = maximumSerializedFragmentByteCount
         self.chaffSource = chaffSource
@@ -54,6 +70,8 @@ public enum MoshSessionError: Error, Equatable, Sendable {
     case alreadyStarted
     case notStarted
     case stopped
+    case shutdownTimedOut
+    case timerExpiredWithoutDueDatagram
 }
 
 public enum MoshSessionEvent: Equatable, Sendable {
@@ -77,6 +95,8 @@ public actor MoshSession {
     private var terminalEngine: MoshTerminalStateEngine
     private var runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>?
     private var receiveTask: Task<Void, Never>?
+    private var maintenanceTask: Task<Void, Never>?
+    private var maintenanceGeneration: UInt64 = 0
     private var isStarted = false
     private var isStopped = false
 
@@ -101,6 +121,7 @@ public actor MoshSession {
 
     deinit {
         self.receiveTask?.cancel()
+        self.maintenanceTask?.cancel()
         self.hostOperationContinuation.finish()
         self.diagnosticEventContinuation.finish()
     }
@@ -148,7 +169,8 @@ public actor MoshSession {
         self.isStarted = true
         self.startReceiveTask(runtime: runtime)
         self.diagnosticEventContinuation.yield(.started(self.configuration.endpoint))
-        try await self.sendDueDatagrams()
+        _ = try await self.sendDueDatagrams()
+        self.restartMaintenanceTask(runtime: runtime)
     }
 
     public func stop() async {
@@ -158,8 +180,11 @@ public actor MoshSession {
 
         self.isStopped = true
         self.isStarted = false
+        self.maintenanceGeneration &+= 1
         self.receiveTask?.cancel()
         self.receiveTask = nil
+        self.maintenanceTask?.cancel()
+        self.maintenanceTask = nil
         await self.runtime?.stop()
         self.runtime = nil
         self.hostOperationContinuation.finish()
@@ -191,21 +216,30 @@ public actor MoshSession {
 
         self.terminalEngine.enqueueClientOperation(operation)
         await runtime.setCurrentState(self.terminalEngine.clientState)
-        try await self.sendDueDatagrams()
+        _ = try await self.sendDueDatagrams()
+        guard self.isStarted, self.isStopped == false else {
+            return
+        }
+        self.restartMaintenanceTask(runtime: runtime)
     }
 
-    private func sendDueDatagrams() async throws {
+    @discardableResult
+    private func sendDueDatagrams() async throws -> Bool {
         try self.requireStarted()
         guard let runtime = self.runtime else {
             throw MoshSessionError.notStarted
         }
         guard let batch = try await runtime.sendDueDatagrams() else {
-            return
+            return false
+        }
+        guard self.isStarted, self.isStopped == false else {
+            return false
         }
 
         self.diagnosticEventContinuation.yield(
             .datagramsSent(packetCount: batch.packets.count)
         )
+        return true
     }
 
     private func handleIncomingInstruction(
@@ -219,6 +253,9 @@ public actor MoshSession {
         self.diagnosticEventContinuation.yield(
             .hostStateReceived(number: state.number, operationCount: operations.count)
         )
+        if let runtime = self.runtime, self.isStarted, self.isStopped == false {
+            self.restartMaintenanceTask(runtime: runtime)
+        }
     }
 
     private func finishFromReceiveTask(throwing error: Error?) async {
@@ -228,6 +265,9 @@ public actor MoshSession {
 
         self.isStopped = true
         self.isStarted = false
+        self.maintenanceGeneration &+= 1
+        self.maintenanceTask?.cancel()
+        self.maintenanceTask = nil
         self.runtime = nil
         if let error {
             self.hostOperationContinuation.finish(throwing: error)
@@ -245,6 +285,27 @@ public actor MoshSession {
         guard self.isStarted else {
             throw MoshSessionError.notStarted
         }
+    }
+
+    private func finishFromMaintenanceTask(
+        throwing error: Error,
+        generation: UInt64
+    ) async {
+        guard self.maintenanceGeneration == generation, self.isStopped == false else {
+            return
+        }
+
+        self.isStopped = true
+        self.isStarted = false
+        self.maintenanceGeneration &+= 1
+        self.receiveTask?.cancel()
+        self.receiveTask = nil
+        self.maintenanceTask = nil
+        await self.runtime?.stop()
+        self.runtime = nil
+        self.hostOperationContinuation.finish(throwing: error)
+        self.diagnosticEventContinuation.yield(.stopped)
+        self.diagnosticEventContinuation.finish()
     }
 
     private func startReceiveTask(
@@ -277,6 +338,68 @@ public actor MoshSession {
                 await self.finishFromReceiveTask(throwing: error)
             }
         }
+    }
+
+    private func restartMaintenanceTask(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
+    ) {
+        self.maintenanceTask?.cancel()
+        self.maintenanceGeneration &+= 1
+        let generation = self.maintenanceGeneration
+        self.maintenanceTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            await self.runMaintenanceLoop(runtime: runtime, generation: generation)
+        }
+    }
+
+    private func runMaintenanceLoop(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>,
+        generation: UInt64
+    ) async {
+        do {
+            while self.shouldContinueMaintenance(generation: generation) {
+                guard let waitMilliseconds = try await runtime.waitTime() else {
+                    return
+                }
+
+                guard self.shouldContinueMaintenance(generation: generation) else {
+                    return
+                }
+
+                if waitMilliseconds > 0 {
+                    try await self.configuration.timer.sleep(
+                        forMilliseconds: waitMilliseconds
+                    )
+                }
+
+                try Task.checkCancellation()
+                guard self.shouldContinueMaintenance(generation: generation) else {
+                    return
+                }
+
+                let sentDatagram = try await self.sendDueDatagrams()
+                if sentDatagram == false, waitMilliseconds == 0 {
+                    throw MoshSessionError.timerExpiredWithoutDueDatagram
+                }
+                if await runtime.shutdownTimedOut() {
+                    throw MoshSessionError.shutdownTimedOut
+                }
+                if await runtime.shutdownAcknowledged() {
+                    await self.stop()
+                    return
+                }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            await self.finishFromMaintenanceTask(throwing: error, generation: generation)
+        }
+    }
+
+    private func shouldContinueMaintenance(generation: UInt64) -> Bool {
+        self.isStarted && self.isStopped == false && self.maintenanceGeneration == generation
     }
 
     private static func makeHostOperationStream(
