@@ -20,8 +20,9 @@ data plane.
 This repository is initialized as a standalone Swift package. The first
 implementation slice covers canonical Mosh session-key validation and
 `mosh-server` bootstrap output parsing. AES-128-OCB now has an RFC 7253
-vector-backed implementation. UDP transport, SSP, wire codecs, packet-level
-Mosh nonce integration, and terminal state synchronization are still pending.
+vector-backed implementation, and Mosh packet nonce construction is modeled.
+UDP transport, SSP, wire codecs, encrypted packet fixtures, and terminal state
+synchronization are still pending.
 
 ## Products
 
@@ -48,7 +49,7 @@ Mosh nonce integration, and terminal state synchronization are still pending.
 
 - Bootstrap adapter boundary.
 - Test infrastructure for deterministic wire, crypto, and state-machine work.
-- Mosh packet nonce integration and encrypted packet fixtures.
+- Encrypted packet fixtures.
 - Tiny protobuf2 codec for Mosh wire messages.
 - SSP state numbering, ACK, throwaway, retransmit, heartbeat, and timeout tests.
 - Real `mosh-server` E2E harness using a locally built or containerized server.
