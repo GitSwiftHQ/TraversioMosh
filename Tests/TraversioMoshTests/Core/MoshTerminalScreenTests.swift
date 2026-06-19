@@ -233,6 +233,92 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func wideScalarsOccupyTwoCellsAndAdvanceByTwoColumns() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A中B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A中 B "])
+        #expect(screen.snapshot.rows[0][1].contents == "中")
+        #expect(screen.snapshot.rows[0][1].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][2].isContinuation == true)
+        #expect(screen.snapshot.rows[0][2].displayWidth == 0)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+    }
+
+    @Test
+    func emojiPresentationScalarsOccupyTwoCells() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("🙂X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["🙂 X "])
+        #expect(screen.snapshot.rows[0][0].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][1].isContinuation == true)
+        #expect(screen.snapshot.rows[0][2].contents == "X")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+    }
+
+    @Test
+    func wideScalarWrapsBeforeRightEdgeWhenItCannotFit() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ab中".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["ab ", "中  "])
+        #expect(screen.snapshot.rows[1][0].displayWidth == 2)
+        #expect(screen.snapshot.rows[1][1].isContinuation == true)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 2))
+    }
+
+    @Test
+    func wideScalarInSingleColumnScreenUsesSingleCell() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 1, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("中".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["中"])
+        #expect(screen.snapshot.rows[0][0].displayWidth == 1)
+        #expect(screen.snapshot.rows[0][0].isContinuation == false)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 0))
+    }
+
+    @Test
+    func overwritingWideScalarClearsContinuationCell() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("中\u{1b}[1;1HX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["X   "])
+        #expect(screen.snapshot.rows[0][1].isContinuation == false)
+        #expect(screen.snapshot.rows[0][1].contents == " ")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func backspaceMovesAcrossWideScalar() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("中\u{08}A".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A   "])
+        #expect(screen.snapshot.rows[0][1].isContinuation == false)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func zeroWidthFormatScalarsAttachWithoutAdvancingCursor() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("e\u{0301}A\u{fe0f}B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["e\u{0301}A\u{fe0f}B "])
+        #expect(screen.snapshot.rows[0][0].contents == "e\u{0301}")
+        #expect(screen.snapshot.rows[0][1].contents == "A\u{fe0f}")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+    }
+
+    @Test
     func invalidUTF8FromOutputFailsAtParserBoundary() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 

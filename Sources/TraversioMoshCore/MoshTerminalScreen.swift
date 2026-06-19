@@ -18,6 +18,8 @@ public struct MoshTerminalCell: Equatable, Sendable {
 
     public let contents: String
     public let attributes: MoshTerminalTextAttributes
+    public let displayWidth: Int
+    public let isContinuation: Bool
 
     public init(
         contents: String,
@@ -25,20 +27,48 @@ public struct MoshTerminalCell: Equatable, Sendable {
     ) {
         self.contents = contents
         self.attributes = attributes
+        self.displayWidth = 1
+        self.isContinuation = false
     }
 
     init(
         scalar: Unicode.Scalar,
-        attributes: MoshTerminalTextAttributes
+        attributes: MoshTerminalTextAttributes,
+        displayWidth: Int
     ) {
         self.contents = String(scalar)
         self.attributes = attributes
+        self.displayWidth = displayWidth
+        self.isContinuation = false
+    }
+
+    private init(
+        contents: String,
+        attributes: MoshTerminalTextAttributes,
+        displayWidth: Int,
+        isContinuation: Bool
+    ) {
+        self.contents = contents
+        self.attributes = attributes
+        self.displayWidth = displayWidth
+        self.isContinuation = isContinuation
+    }
+
+    static func continuation(attributes: MoshTerminalTextAttributes) -> MoshTerminalCell {
+        MoshTerminalCell(
+            contents: " ",
+            attributes: attributes,
+            displayWidth: 0,
+            isContinuation: true
+        )
     }
 
     func appending(_ scalar: Unicode.Scalar) -> MoshTerminalCell {
         MoshTerminalCell(
             contents: self.contents + String(scalar),
-            attributes: self.attributes
+            attributes: self.attributes,
+            displayWidth: self.displayWidth,
+            isContinuation: self.isContinuation
         )
     }
 }
@@ -173,9 +203,10 @@ public struct MoshTerminalScreen: Sendable {
             break
         case .backspace:
             self.wrapPending = false
+            let column = self.previousCursorColumn()
             self.cursor = MoshTerminalCursor(
                 row: self.cursor.row,
-                column: max(0, self.cursor.column - 1)
+                column: column
             )
         case .horizontalTab:
             self.wrapPending = false
@@ -216,9 +247,9 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private mutating func place(_ scalar: Unicode.Scalar) {
-        if Self.isCombiningScalar(scalar) {
-            let column = self.cursor.column > 0 ? self.cursor.column - 1 : self.cursor.column
-            self.rows[self.cursor.row][column] = self.rows[self.cursor.row][column].appending(scalar)
+        let scalarWidth = MoshTerminalCharacterWidth.width(of: scalar)
+        if scalarWidth == .zero {
+            self.appendZeroWidthScalar(scalar)
             return
         }
 
@@ -228,18 +259,80 @@ public struct MoshTerminalScreen: Sendable {
             self.wrapPending = false
         }
 
+        let displayWidth = min(scalarWidth.rawValue, self.maximumColumn + 1)
+        if displayWidth > self.availableColumnsFromCursor {
+            self.index()
+            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
+            self.wrapPending = false
+        }
+
+        self.clearCellForWrite(row: self.cursor.row, column: self.cursor.column)
         self.rows[self.cursor.row][self.cursor.column] = MoshTerminalCell(
             scalar: scalar,
-            attributes: self.currentAttributes
+            attributes: self.currentAttributes,
+            displayWidth: displayWidth
         )
-        if self.cursor.column == self.maximumColumn {
+        if displayWidth == 2 {
+            self.clearCellForWrite(row: self.cursor.row, column: self.cursor.column + 1)
+            self.rows[self.cursor.row][self.cursor.column + 1] = .continuation(
+                attributes: self.currentAttributes
+            )
+        }
+
+        let lastColumn = self.cursor.column + displayWidth - 1
+        if lastColumn == self.maximumColumn {
+            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: self.maximumColumn)
             self.wrapPending = true
         } else {
             self.cursor = MoshTerminalCursor(
                 row: self.cursor.row,
-                column: self.cursor.column + 1
+                column: lastColumn + 1
             )
         }
+    }
+
+    private var availableColumnsFromCursor: Int {
+        self.maximumColumn - self.cursor.column + 1
+    }
+
+    private mutating func appendZeroWidthScalar(_ scalar: Unicode.Scalar) {
+        let targetColumn: Int
+        if self.wrapPending {
+            targetColumn = self.cursor.column
+        } else if self.cursor.column > 0 {
+            targetColumn = self.cursor.column - 1
+        } else {
+            targetColumn = self.cursor.column
+        }
+
+        let column = self.leadingColumn(row: self.cursor.row, column: targetColumn)
+        self.rows[self.cursor.row][column] = self.rows[self.cursor.row][column].appending(scalar)
+    }
+
+    private mutating func clearCellForWrite(row: Int, column: Int) {
+        guard self.rows.indices.contains(row),
+              self.rows[row].indices.contains(column) else {
+            return
+        }
+
+        let leadingColumn = self.leadingColumn(row: row, column: column)
+        let displayWidth = max(self.rows[row][leadingColumn].displayWidth, 1)
+        for clearedColumn in leadingColumn..<min(leadingColumn + displayWidth, self.rows[row].count) {
+            self.rows[row][clearedColumn] = .blank
+        }
+    }
+
+    private func leadingColumn(row: Int, column: Int) -> Int {
+        var leadingColumn = column
+        while leadingColumn > 0, self.rows[row][leadingColumn].isContinuation {
+            leadingColumn -= 1
+        }
+        return leadingColumn
+    }
+
+    private func previousCursorColumn() -> Int {
+        let column = max(0, self.cursor.column - 1)
+        return self.leadingColumn(row: self.cursor.row, column: column)
     }
 
     private mutating func index() {
@@ -647,7 +740,7 @@ public struct MoshTerminalScreen: Sendable {
 
     private mutating func blankCells(row: Int, columns: ClosedRange<Int>) {
         for column in columns {
-            self.rows[row][column] = .blank
+            self.clearCellForWrite(row: row, column: column)
         }
     }
 
@@ -800,6 +893,10 @@ public struct MoshTerminalScreen: Sendable {
             }
         }
 
+        for row in newRows.indices {
+            self.normalizeContinuations(in: &newRows[row])
+        }
+
         return newRows
     }
 
@@ -814,16 +911,26 @@ public struct MoshTerminalScreen: Sendable {
         )
     }
 
-    private static func isCombiningScalar(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x0300...0x036f,
-             0x1ab0...0x1aff,
-             0x1dc0...0x1dff,
-             0x20d0...0x20ff,
-             0xfe20...0xfe2f:
-            return true
-        default:
-            return false
+    private static func normalizeContinuations(in row: inout [MoshTerminalCell]) {
+        for column in row.indices {
+            if row[column].isContinuation {
+                if column == 0 || row[column - 1].displayWidth < 2 {
+                    row[column] = .blank
+                }
+                continue
+            }
+
+            guard row[column].displayWidth > 1 else {
+                continue
+            }
+
+            if column + row[column].displayWidth > row.count {
+                row[column] = .blank
+            } else {
+                for continuationColumn in (column + 1)..<(column + row[column].displayWidth) {
+                    row[continuationColumn] = .continuation(attributes: row[column].attributes)
+                }
+            }
         }
     }
 }
