@@ -10,6 +10,7 @@ import TraversioMoshWire
 struct MoshSSPInMemoryLoopTests {
     @Test
     func fragmentedStateUpdateRoundTripsAndAcknowledges() throws {
+        let noReplyTimestamp = UInt16.max
         var client = MoshSSPInMemoryLoop(
             initialSendState: ByteState(),
             initialReceiveState: ByteState(),
@@ -29,7 +30,7 @@ struct MoshSSPInMemoryLoopTests {
 
         #expect(clientBatch.packets.count > 1)
         #expect(clientBatch.packets.first?.plaintext.timestamp == 20)
-        #expect(clientBatch.packets.first?.plaintext.timestampReply == 0)
+        #expect(clientBatch.packets.allSatisfy { $0.plaintext.timestampReply == noReplyTimestamp })
 
         let receiveResult = try deliver(clientBatch.packets.reversed(), to: &server, nowMilliseconds: 21)
 
@@ -42,11 +43,69 @@ struct MoshSSPInMemoryLoopTests {
         #expect(acknowledgementBatch.instruction.acknowledgementNumber == 1)
         #expect(acknowledgementBatch.instruction.diff == [])
         #expect(acknowledgementBatch.packets.first?.plaintext.timestamp == 121)
-        #expect(acknowledgementBatch.packets.first?.plaintext.timestampReply == 20)
+        #expect(acknowledgementBatch.packets.first?.plaintext.timestampReply == 120)
 
         _ = try deliver(acknowledgementBatch.packets, to: &client, nowMilliseconds: 122)
 
         #expect(client.knownAcknowledgedSendStateNumber == 1)
+    }
+
+    @Test
+    func freshTimestampReplyIsCorrectedAndConsumedPerOutgoingPacket() throws {
+        let noReplyTimestamp = UInt16.max
+        var client = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            chaffSource: .none
+        )
+        var server = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            maximumSerializedFragmentByteCount: MoshFragment.headerByteCount + 12,
+            chaffSource: .none
+        )
+
+        client.setCurrentState(ByteState([1, 2, 3]), nowMilliseconds: 0)
+        let clientBatch = try #require(try client.tick(nowMilliseconds: 20))
+
+        _ = try deliver(clientBatch.packets, to: &server, nowMilliseconds: 21)
+
+        let serverState = ByteState((0..<200).map { UInt8(truncatingIfNeeded: $0) })
+        server.setCurrentState(serverState, nowMilliseconds: 22)
+        let serverBatch = try #require(try server.tick(nowMilliseconds: 41))
+
+        #expect(serverBatch.packets.count > 1)
+        #expect(serverBatch.packets.first?.plaintext.timestamp == 41)
+        #expect(serverBatch.packets.first?.plaintext.timestampReply == 40)
+        #expect(serverBatch.packets.dropFirst().allSatisfy { $0.plaintext.timestampReply == noReplyTimestamp })
+    }
+
+    @Test
+    func staleTimestampReplyIsSuppressedAfterFreshnessWindow() throws {
+        let noReplyTimestamp = UInt16.max
+        var client = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            chaffSource: .none
+        )
+        var server = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            chaffSource: .none
+        )
+
+        client.setCurrentState(ByteState([1, 2, 3]), nowMilliseconds: 0)
+        let clientBatch = try #require(try client.tick(nowMilliseconds: 20))
+
+        _ = try deliver(clientBatch.packets, to: &server, nowMilliseconds: 21)
+
+        let serverBatch = try #require(try server.tick(nowMilliseconds: 1_021))
+
+        #expect(serverBatch.instruction.acknowledgementNumber == 1)
+        #expect(serverBatch.packets.first?.plaintext.timestampReply == noReplyTimestamp)
     }
 
     @Test

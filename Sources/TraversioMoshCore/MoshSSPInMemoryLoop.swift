@@ -59,13 +59,21 @@ public struct MoshSSPInMemoryLoop<
     SendState: MoshSynchronizedState,
     ReceiveState: MoshSynchronizedState
 >: Sendable {
+    private struct PendingTimestampReply: Equatable, Sendable {
+        var timestamp: UInt16
+        var receivedAtMilliseconds: UInt64
+    }
+
+    private static var packetTimestampNoReply: UInt16 { UInt16.max }
+    private static var timestampReplyFreshnessWindowMilliseconds: UInt64 { 1_000 }
+
     public private(set) var scheduler: MoshSSPSendScheduler<SendState>
     public private(set) var receiver: MoshSSPReceiver<ReceiveState>
 
     private var fragmenter: MoshFragmenter
     private var assembly: MoshFragmentAssembly
     private let maximumSerializedFragmentByteCount: Int
-    private var lastReceivedTimestamp: UInt16
+    private var pendingTimestampReply: PendingTimestampReply?
 
     public init(
         initialSendState: SendState,
@@ -85,7 +93,7 @@ public struct MoshSSPInMemoryLoop<
         self.fragmenter = MoshFragmenter()
         self.assembly = MoshFragmentAssembly()
         self.maximumSerializedFragmentByteCount = maximumSerializedFragmentByteCount
-        self.lastReceivedTimestamp = 0
+        self.pendingTimestampReply = nil
     }
 
     public var latestReceivedState: MoshNumberedState<ReceiveState> {
@@ -139,7 +147,7 @@ public struct MoshSSPInMemoryLoop<
         let packets = fragments.map { fragment in
             let plaintext = MoshPacketPlaintext(
                 timestamp: timestamp,
-                timestampReply: self.lastReceivedTimestamp,
+                timestampReply: self.consumeTimestampReply(nowMilliseconds: nowMilliseconds),
                 payload: fragment.serializedBytes()
             )
             return MoshSSPOutgoingPacket(plaintext: plaintext, fragment: fragment)
@@ -156,7 +164,12 @@ public struct MoshSSPInMemoryLoop<
         _ packet: MoshPacketPlaintext,
         nowMilliseconds: UInt64
     ) throws -> MoshSSPIncomingPacketResult<ReceiveState> {
-        self.lastReceivedTimestamp = packet.timestamp
+        if packet.timestamp != Self.packetTimestampNoReply {
+            self.pendingTimestampReply = PendingTimestampReply(
+                timestamp: packet.timestamp,
+                receivedAtMilliseconds: nowMilliseconds
+            )
+        }
         self.scheduler.noteRemoteHeard(nowMilliseconds: nowMilliseconds)
 
         let fragment = try MoshFragment(serializedBytes: packet.payload)
@@ -198,5 +211,22 @@ public struct MoshSSPInMemoryLoop<
 
     private static func packetTimestamp(for nowMilliseconds: UInt64) -> UInt16 {
         UInt16(truncatingIfNeeded: nowMilliseconds)
+    }
+
+    private mutating func consumeTimestampReply(nowMilliseconds: UInt64) -> UInt16 {
+        guard let pendingTimestampReply else {
+            return Self.packetTimestampNoReply
+        }
+        guard nowMilliseconds >= pendingTimestampReply.receivedAtMilliseconds else {
+            return Self.packetTimestampNoReply
+        }
+
+        let elapsedMilliseconds = nowMilliseconds - pendingTimestampReply.receivedAtMilliseconds
+        guard elapsedMilliseconds < Self.timestampReplyFreshnessWindowMilliseconds else {
+            return Self.packetTimestampNoReply
+        }
+
+        self.pendingTimestampReply = nil
+        return UInt16(truncatingIfNeeded: UInt64(pendingTimestampReply.timestamp) + elapsedMilliseconds)
     }
 }
