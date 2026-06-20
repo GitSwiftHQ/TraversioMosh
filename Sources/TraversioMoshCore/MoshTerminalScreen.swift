@@ -849,6 +849,8 @@ public struct MoshTerminalScreen: Sendable {
         switch mode {
         case 1:
             self.applicationCursorKeys = enabled
+        case 3:
+            self.clearScreenForColumnMode()
         case 5:
             self.reverseVideo = enabled
         case 6:
@@ -896,6 +898,11 @@ public struct MoshTerminalScreen: Sendable {
         default:
             break
         }
+    }
+
+    private mutating func clearScreenForColumnMode() {
+        self.rows = Self.blankRows(dimensions: self.dimensions)
+        self.homeCursor()
     }
 
     private mutating func setMode(_ mode: Int, enabled: Bool) {

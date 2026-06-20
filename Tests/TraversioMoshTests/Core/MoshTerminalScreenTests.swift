@@ -116,6 +116,38 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func deccolmPrivateModeClearsScreenWithoutChangingDimensions() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcde1234\u{1b}[2;4H\u{1b}[?3hX".utf8)))
+
+        #expect(screen.snapshot.dimensions == (try MoshTerminalDimensions(columns: 5, rows: 2)))
+        #expect(screen.snapshot.lineStrings == ["X    ", "     "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("YZ\u{1b}[?3lQ".utf8)))
+
+        #expect(screen.snapshot.dimensions == (try MoshTerminalDimensions(columns: 5, rows: 2)))
+        #expect(screen.snapshot.lineStrings == ["Q    ", "     "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func deccolmPrivateModeHomesInsideOriginModeScrollRegion() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;3r\u{1b}[?6h\u{1b}[3;5HX\u{1b}[?3hY".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "     ",
+            "Y    ",
+            "     ",
+            "     "
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func privateMouseReportingModesFollowOfficialSetAndClear() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
