@@ -400,8 +400,7 @@ public struct MoshTerminalScreen: Sendable {
                 column: column
             )
         case .horizontalTab:
-            self.wrapPending = false
-            self.moveForwardTabStops(count: 1)
+            self.moveForwardTabStops(count: 1, preservingPendingWrap: true)
         case .lineFeed:
             self.wrapPending = false
             self.index()
@@ -1243,7 +1242,10 @@ public struct MoshTerminalScreen: Sendable {
                 column: Self.parameter(values, at: 1, default: 1) - 1
             )
         case UInt8(ascii: "I"):
-            self.moveForwardTabStops(count: Self.parameter(values, at: 0, default: 1))
+            self.moveForwardTabStops(
+                count: Self.parameter(values, at: 0, default: 1),
+                preservingPendingWrap: true
+            )
         case UInt8(ascii: "J"):
             self.eraseScreen(mode: Self.parameter(values, at: 0, default: 0))
         case UInt8(ascii: "K"):
@@ -1261,7 +1263,10 @@ public struct MoshTerminalScreen: Sendable {
         case UInt8(ascii: "X"):
             self.eraseCharacters(count: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "Z"):
-            self.moveBackwardTabStops(count: Self.parameter(values, at: 0, default: 1))
+            self.moveBackwardTabStops(
+                count: Self.parameter(values, at: 0, default: 1),
+                preservingPendingWrap: true
+            )
         case UInt8(ascii: "`"):
             self.setCursor(
                 row: self.cursor.row,
@@ -1277,7 +1282,10 @@ public struct MoshTerminalScreen: Sendable {
         case UInt8(ascii: "e"):
             self.moveCursor(rowDelta: Self.parameter(values, at: 0, default: 1), columnDelta: 0)
         case UInt8(ascii: "g"):
-            self.clearTabStops(mode: Self.parameter(values, at: 0, default: 0))
+            self.clearTabStops(
+                mode: Self.parameter(values, at: 0, default: 0),
+                preservingPendingWrap: true
+            )
         case UInt8(ascii: "h"):
             if isPrivate {
                 values.compactMap { $0 }.forEach { self.setPrivateMode($0, enabled: true) }
@@ -1400,7 +1408,17 @@ public struct MoshTerminalScreen: Sendable {
         return 0...self.maximumRow
     }
 
-    private mutating func moveForwardTabStops(count: Int) {
+    private mutating func moveForwardTabStops(
+        count: Int,
+        preservingPendingWrap: Bool = false
+    ) {
+        let pendingWrap = self.wrapPending
+        defer {
+            if preservingPendingWrap {
+                self.wrapPending = pendingWrap
+            }
+        }
+
         let amount = max(count, 0)
         guard amount > 0 else {
             return
@@ -1417,7 +1435,17 @@ public struct MoshTerminalScreen: Sendable {
         self.setCursor(row: self.cursor.row, column: column)
     }
 
-    private mutating func moveBackwardTabStops(count: Int) {
+    private mutating func moveBackwardTabStops(
+        count: Int,
+        preservingPendingWrap: Bool = false
+    ) {
+        let pendingWrap = self.wrapPending
+        defer {
+            if preservingPendingWrap {
+                self.wrapPending = pendingWrap
+            }
+        }
+
         let amount = max(count, 0)
         guard amount > 0 else {
             return
@@ -1448,7 +1476,17 @@ public struct MoshTerminalScreen: Sendable {
         self.wrapPending = false
     }
 
-    private mutating func clearTabStops(mode: Int) {
+    private mutating func clearTabStops(
+        mode: Int,
+        preservingPendingWrap: Bool = false
+    ) {
+        let pendingWrap = self.wrapPending
+        defer {
+            if preservingPendingWrap {
+                self.wrapPending = pendingWrap
+            }
+        }
+
         switch mode {
         case 0:
             self.tabStops.remove(self.cursor.column)
