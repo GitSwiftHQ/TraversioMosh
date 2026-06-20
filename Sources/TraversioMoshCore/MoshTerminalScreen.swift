@@ -1052,6 +1052,11 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private mutating func executeCSI(finalByte: UInt8, parameters: String, intermediates: String) {
+        if intermediates == "!", finalByte == UInt8(ascii: "p") {
+            self.softReset()
+            return
+        }
+
         guard intermediates.isEmpty else {
             return
         }
@@ -1171,6 +1176,17 @@ public struct MoshTerminalScreen: Sendable {
         self.g0CharacterSet = .usASCII
         self.g1CharacterSet = .usASCII
         self.activeCharacterSetSlot = .g0
+    }
+
+    private mutating func softReset() {
+        self.scrollRegion = .full(rowCount: self.rows.count)
+        self.currentAttributes = .default
+        self.normalSavedCursorState = nil
+        self.alternateSavedCursorState = nil
+        self.wrapPending = false
+        self.originMode = false
+        self.insertMode = false
+        self.isCursorVisible = true
     }
 
     private mutating func moveCursor(rowDelta: Int, columnDelta: Int) {
