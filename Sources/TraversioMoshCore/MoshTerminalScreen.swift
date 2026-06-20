@@ -13,26 +13,6 @@ public struct MoshTerminalCursor: Equatable, Sendable {
     }
 }
 
-public enum MoshTerminalLineRendition: Equatable, Sendable {
-    case singleWidth
-    case doubleWidth
-    case doubleHeightTop
-    case doubleHeightBottom
-
-    public var isDoubleWidth: Bool {
-        self != .singleWidth
-    }
-
-    public var isDoubleHeight: Bool {
-        switch self {
-        case .doubleHeightTop, .doubleHeightBottom:
-            return true
-        case .singleWidth, .doubleWidth:
-            return false
-        }
-    }
-}
-
 public struct MoshTerminalHyperlink: Equatable, Sendable {
     public let parameters: String
     public let url: String
@@ -149,7 +129,6 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
     public let clipboard: String
     public let currentHyperlink: MoshTerminalHyperlink?
     public let rows: [[MoshTerminalCell]]
-    public let lineRenditions: [MoshTerminalLineRendition]
 
     public init(
         dimensions: MoshTerminalDimensions,
@@ -168,8 +147,7 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
         windowTitle: String = "",
         clipboard: String = "",
         currentHyperlink: MoshTerminalHyperlink? = nil,
-        rows: [[MoshTerminalCell]],
-        lineRenditions: [MoshTerminalLineRendition]? = nil
+        rows: [[MoshTerminalCell]]
     ) {
         self.dimensions = dimensions
         self.cursor = cursor
@@ -188,28 +166,12 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
         self.clipboard = clipboard
         self.currentHyperlink = currentHyperlink
         self.rows = rows
-        self.lineRenditions = Self.normalizedLineRenditions(
-            lineRenditions,
-            rowCount: rows.count
-        )
     }
 
     public var lineStrings: [String] {
         self.rows.map { row in
             row.map(\.contents).joined()
         }
-    }
-
-    private static func normalizedLineRenditions(
-        _ lineRenditions: [MoshTerminalLineRendition]?,
-        rowCount: Int
-    ) -> [MoshTerminalLineRendition] {
-        guard let lineRenditions else {
-            return Array(repeating: .singleWidth, count: rowCount)
-        }
-
-        return Array(lineRenditions.prefix(rowCount))
-            + Array(repeating: .singleWidth, count: max(rowCount - lineRenditions.count, 0))
     }
 }
 
@@ -222,7 +184,6 @@ public struct MoshTerminalScreen: Sendable {
 
     private var parser: MoshTerminalInputParser
     private var rows: [[MoshTerminalCell]]
-    private var lineRenditions: [MoshTerminalLineRendition]
     private var scrollRegion: MoshTerminalScrollRegion
     private var currentAttributes: MoshTerminalTextAttributes
     private var normalSavedCursorState: MoshTerminalSavedCursorState?
@@ -255,7 +216,6 @@ public struct MoshTerminalScreen: Sendable {
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
         self.parser = MoshTerminalInputParser()
         self.rows = Self.blankRows(dimensions: dimensions)
-        self.lineRenditions = Self.defaultLineRenditions(rowCount: Int(dimensions.rows))
         self.scrollRegion = .full(rowCount: Int(dimensions.rows))
         self.currentAttributes = .default
         self.normalSavedCursorState = nil
@@ -302,8 +262,7 @@ public struct MoshTerminalScreen: Sendable {
             windowTitle: self.windowTitle,
             clipboard: self.clipboard,
             currentHyperlink: self.currentHyperlink,
-            rows: self.rows,
-            lineRenditions: self.lineRenditions
+            rows: self.rows
         )
     }
 
@@ -350,12 +309,11 @@ public struct MoshTerminalScreen: Sendable {
     public mutating func resize(_ dimensions: MoshTerminalDimensions) {
         self.dimensions = dimensions
         self.rows = Self.resizedRows(self.rows, dimensions: dimensions)
-        self.lineRenditions = Self.resizedLineRenditions(
-            self.lineRenditions,
-            rowCount: self.rows.count
+        self.cursor = Self.clampedCursor(
+            self.cursor,
+            maximumRow: self.maximumRow,
+            maximumColumn: self.maximumColumn
         )
-        self.blankCellsPastEffectiveRightMargins()
-        self.cursor = self.clampedCursorForLineRendition(self.cursor)
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.wrapPending = false
         self.tabStops = self.tabStops.filter { $0 <= self.maximumColumn }
@@ -374,16 +332,7 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private var currentMaximumColumn: Int {
-        self.effectiveMaximumColumn(row: self.cursor.row)
-    }
-
-    private func effectiveMaximumColumn(row: Int) -> Int {
-        guard self.lineRenditions.indices.contains(row),
-              self.lineRenditions[row].isDoubleWidth else {
-            return self.maximumColumn
-        }
-
-        return max((self.maximumColumn + 1) / 2 - 1, 0)
+        self.maximumColumn
     }
 
     private mutating func apply(_ control: MoshTerminalControl) {
@@ -603,7 +552,6 @@ public struct MoshTerminalScreen: Sendable {
                 column: self.cursor.column
             )
         }
-        self.clampCursorToCurrentLine()
     }
 
     private mutating func reverseIndex() {
@@ -615,7 +563,6 @@ public struct MoshTerminalScreen: Sendable {
                 column: self.cursor.column
             )
         }
-        self.clampCursorToCurrentLine()
         self.wrapPending = false
     }
 
@@ -636,16 +583,9 @@ public struct MoshTerminalScreen: Sendable {
         }
 
         let activeRows = Array(self.rows[region.range])
-        let activeLineRenditions = Array(self.lineRenditions[region.range])
         let replacement = Array(activeRows.dropFirst(amount))
             + Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
-        let replacementLineRenditions = Array(activeLineRenditions.dropFirst(amount))
-            + Self.defaultLineRenditions(rowCount: amount)
-        self.replaceRows(
-            in: region.range,
-            with: replacement,
-            lineRenditions: replacementLineRenditions
-        )
+        self.replaceRows(in: region.range, with: replacement)
     }
 
     private mutating func scrollRowsDown(count: Int, region: MoshTerminalScrollRegion) {
@@ -655,16 +595,9 @@ public struct MoshTerminalScreen: Sendable {
         }
 
         let activeRows = Array(self.rows[region.range])
-        let activeLineRenditions = Array(self.lineRenditions[region.range])
         let replacement = Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
             + Array(activeRows.dropLast(amount))
-        let replacementLineRenditions = Self.defaultLineRenditions(rowCount: amount)
-            + Array(activeLineRenditions.dropLast(amount))
-        self.replaceRows(
-            in: region.range,
-            with: replacement,
-            lineRenditions: replacementLineRenditions
-        )
+        self.replaceRows(in: region.range, with: replacement)
     }
 
     private mutating func insertLines(count: Int) {
@@ -679,16 +612,9 @@ public struct MoshTerminalScreen: Sendable {
 
         let range = self.cursor.row...self.scrollRegion.bottom
         let activeRows = Array(self.rows[range])
-        let activeLineRenditions = Array(self.lineRenditions[range])
         let replacement = Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
             + Array(activeRows.dropLast(amount))
-        let replacementLineRenditions = Self.defaultLineRenditions(rowCount: amount)
-            + Array(activeLineRenditions.dropLast(amount))
-        self.replaceRows(
-            in: range,
-            with: replacement,
-            lineRenditions: replacementLineRenditions
-        )
+        self.replaceRows(in: range, with: replacement)
         self.wrapPending = false
     }
 
@@ -704,16 +630,9 @@ public struct MoshTerminalScreen: Sendable {
 
         let range = self.cursor.row...self.scrollRegion.bottom
         let activeRows = Array(self.rows[range])
-        let activeLineRenditions = Array(self.lineRenditions[range])
         let replacement = Array(activeRows.dropFirst(amount))
             + Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
-        let replacementLineRenditions = Array(activeLineRenditions.dropFirst(amount))
-            + Self.defaultLineRenditions(rowCount: amount)
-        self.replaceRows(
-            in: range,
-            with: replacement,
-            lineRenditions: replacementLineRenditions
-        )
+        self.replaceRows(in: range, with: replacement)
         self.wrapPending = false
     }
 
@@ -772,12 +691,10 @@ public struct MoshTerminalScreen: Sendable {
 
     private mutating func replaceRows(
         in range: ClosedRange<Int>,
-        with replacement: [[MoshTerminalCell]],
-        lineRenditions replacementLineRenditions: [MoshTerminalLineRendition]
+        with replacement: [[MoshTerminalCell]]
     ) {
         for offset in replacement.indices {
             self.rows[range.lowerBound + offset] = replacement[offset]
-            self.lineRenditions[range.lowerBound + offset] = replacementLineRenditions[offset]
         }
     }
 
@@ -812,7 +729,11 @@ public struct MoshTerminalScreen: Sendable {
     private mutating func restoreCursorState() {
         let savedCursorState = self.activeSavedCursorState ?? .default
 
-        self.cursor = self.clampedCursorForLineRendition(savedCursorState.cursor)
+        self.cursor = Self.clampedCursor(
+            savedCursorState.cursor,
+            maximumRow: self.maximumRow,
+            maximumColumn: self.maximumColumn
+        )
         self.currentAttributes = savedCursorState.attributes
         self.autoWrapMode = savedCursorState.autoWrapMode
         self.originMode = savedCursorState.originMode
@@ -950,18 +871,6 @@ public struct MoshTerminalScreen: Sendable {
             self.escapeState = .escape
         case (.characterSetDesignation, _):
             self.escapeState = nil
-        case (.escapeHash, .scalar("3")):
-            self.setLineRendition(.doubleHeightTop)
-            self.escapeState = nil
-        case (.escapeHash, .scalar("4")):
-            self.setLineRendition(.doubleHeightBottom)
-            self.escapeState = nil
-        case (.escapeHash, .scalar("5")):
-            self.setLineRendition(.singleWidth)
-            self.escapeState = nil
-        case (.escapeHash, .scalar("6")):
-            self.setLineRendition(.doubleWidth)
-            self.escapeState = nil
         case (.escapeHash, .scalar("8")):
             self.screenAlignmentTest()
             self.escapeState = nil
@@ -1002,27 +911,11 @@ public struct MoshTerminalScreen: Sendable {
 
     private mutating func screenAlignmentTest() {
         self.rows = Self.alignmentRows(dimensions: self.dimensions)
-        self.lineRenditions = Self.defaultLineRenditions(rowCount: self.rows.count)
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.currentAttributes = .default
         self.wrapPending = false
         self.originMode = false
-    }
-
-    private mutating func setLineRendition(_ rendition: MoshTerminalLineRendition) {
-        let row = self.cursor.row
-        guard self.lineRenditions.indices.contains(row) else {
-            return
-        }
-
-        let previousRendition = self.lineRenditions[row]
-        self.lineRenditions[row] = rendition
-        if rendition.isDoubleWidth, previousRendition.isDoubleWidth == false {
-            self.blankCellsPastEffectiveRightMargin(row: row)
-        }
-        self.clampCursorToCurrentLine()
-        self.wrapPending = false
     }
 
     private mutating func consumeStringControl(
@@ -1314,7 +1207,6 @@ public struct MoshTerminalScreen: Sendable {
 
     private mutating func reset() {
         self.rows = Self.blankRows(dimensions: self.dimensions)
-        self.lineRenditions = Self.defaultLineRenditions(rowCount: self.rows.count)
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.currentAttributes = .default
@@ -1358,7 +1250,7 @@ public struct MoshTerminalScreen: Sendable {
         let targetRow = min(max(self.cursor.row + rowDelta, rowBounds.lowerBound), rowBounds.upperBound)
         self.cursor = MoshTerminalCursor(
             row: targetRow,
-            column: min(max(self.cursor.column + columnDelta, 0), self.effectiveMaximumColumn(row: targetRow))
+            column: min(max(self.cursor.column + columnDelta, 0), self.maximumColumn)
         )
         self.wrapPending = false
     }
@@ -1367,7 +1259,7 @@ public struct MoshTerminalScreen: Sendable {
         let targetRow = min(max(row, 0), self.maximumRow)
         self.cursor = MoshTerminalCursor(
             row: targetRow,
-            column: min(max(column, 0), self.effectiveMaximumColumn(row: targetRow))
+            column: min(max(column, 0), self.maximumColumn)
         )
         self.wrapPending = false
     }
@@ -1378,7 +1270,7 @@ public struct MoshTerminalScreen: Sendable {
         let targetRow = min(max(absoluteRow, rowBounds.lowerBound), rowBounds.upperBound)
         self.cursor = MoshTerminalCursor(
             row: targetRow,
-            column: min(max(column, 0), self.effectiveMaximumColumn(row: targetRow))
+            column: min(max(column, 0), self.maximumColumn)
         )
         self.wrapPending = false
     }
@@ -1549,39 +1441,6 @@ public struct MoshTerminalScreen: Sendable {
         }
     }
 
-    private mutating func blankCellsPastEffectiveRightMargins() {
-        for row in self.rows.indices {
-            self.blankCellsPastEffectiveRightMargin(row: row)
-        }
-    }
-
-    private mutating func blankCellsPastEffectiveRightMargin(row: Int) {
-        guard self.rows.indices.contains(row) else {
-            return
-        }
-
-        let lineMaximumColumn = self.effectiveMaximumColumn(row: row)
-        guard lineMaximumColumn < self.maximumColumn else {
-            return
-        }
-
-        for column in (lineMaximumColumn + 1)...self.maximumColumn {
-            self.clearCellForWrite(row: row, column: column)
-        }
-    }
-
-    private mutating func clampCursorToCurrentLine() {
-        self.cursor = self.clampedCursorForLineRendition(self.cursor)
-    }
-
-    private func clampedCursorForLineRendition(_ cursor: MoshTerminalCursor) -> MoshTerminalCursor {
-        let row = min(max(cursor.row, 0), self.maximumRow)
-        return MoshTerminalCursor(
-            row: row,
-            column: min(max(cursor.column, 0), self.effectiveMaximumColumn(row: row))
-        )
-    }
-
     private mutating func applySGR(parameters: [Int?]) {
         let values = parameters.isEmpty ? [0] : parameters.map { $0 ?? 0 }
         var index = 0
@@ -1729,18 +1588,6 @@ public struct MoshTerminalScreen: Sendable {
         return (0..<rowCount).map { _ in
             self.blankRow(columnCount: columnCount)
         }
-    }
-
-    fileprivate static func defaultLineRenditions(rowCount: Int) -> [MoshTerminalLineRendition] {
-        Array(repeating: .singleWidth, count: rowCount)
-    }
-
-    fileprivate static func resizedLineRenditions(
-        _ oldLineRenditions: [MoshTerminalLineRendition],
-        rowCount: Int
-    ) -> [MoshTerminalLineRendition] {
-        Array(oldLineRenditions.prefix(rowCount))
-            + Self.defaultLineRenditions(rowCount: max(rowCount - oldLineRenditions.count, 0))
     }
 
     private static func alignmentRows(dimensions: MoshTerminalDimensions) -> [[MoshTerminalCell]] {
