@@ -895,6 +895,16 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func csiEraseScreenModeThreeClearsPendingWrapWithoutClearingFramebuffer() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[3JX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abcX", "    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+    }
+
+    @Test
     func oscTitleStringTerminatedByBellDoesNotRenderPayload() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
 

@@ -1507,7 +1507,7 @@ public struct MoshTerminalScreen: Sendable {
                 let endColumn = row == self.cursor.row ? self.cursor.column : self.maximumColumn
                 self.blankCells(row: row, columns: 0...endColumn)
             }
-        case 2, 3:
+        case 2:
             self.rows = Self.blankRows(dimensions: self.dimensions)
         default:
             break
