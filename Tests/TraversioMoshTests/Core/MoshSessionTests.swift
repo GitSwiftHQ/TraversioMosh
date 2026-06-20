@@ -367,6 +367,62 @@ struct MoshSessionTests {
     }
 
     @Test
+    func screenProjectionFailureEmitsTypedDiagnosticAndFinishesStreams() async throws {
+        let fixture = try await makeSessionFixture(columns: 3, rows: 2)
+        let diagnosticEventTask = collectEvents(from: fixture.session, count: 4)
+        let hostStreamFailureTask = collectStreamFailure(from: fixture.session.hostOperations)
+        let renderStreamFailureTask = collectStreamFailure(from: fixture.session.renderOperations)
+        let invalidOutput = MoshTerminalOutput(bytes: [0xff])
+        let hostOperation = MoshHostOperation.write(invalidOutput)
+        let expectedFailure = MoshSessionScreenProjectionFailure(
+            stateNumber: 1,
+            operationIndex: 0,
+            operation: .write(invalidOutput),
+            reason: .terminalInputParser(.invalidUTF8(offset: 0))
+        )
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(hostOperation)
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            let diagnosticEvents = try await withSessionTimeout {
+                await diagnosticEventTask.value
+            }
+            let hostStreamError = try #require(await hostStreamFailureTask.value)
+            let hostFailure = try #require(hostStreamError as? MoshSessionScreenProjectionFailure)
+            let renderStreamError = try #require(await renderStreamFailureTask.value)
+            let renderFailure = try #require(renderStreamError as? MoshSessionScreenProjectionFailure)
+
+            #expect(
+                diagnosticEvents == [
+                    .started(fixture.endpoint),
+                    .datagramsSent(packetCount: 1),
+                    .screenProjectionFailed(expectedFailure),
+                    .stopped,
+                ]
+            )
+            #expect(hostFailure == expectedFailure)
+            #expect(renderFailure == expectedFailure)
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["   ", "   "])
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            diagnosticEventTask.cancel()
+            hostStreamFailureTask.cancel()
+            renderStreamFailureTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
     func lifecycleRejectsInvalidStartAndStoppedOperations() async throws {
         let fixture = try await makeSessionFixture(columns: 80, rows: 24)
 
@@ -862,6 +918,20 @@ private func collectEvents(
             events.append(event)
         }
         return events
+    }
+}
+
+private func collectStreamFailure<Element: Sendable>(
+    from stream: AsyncThrowingStream<Element, Error>
+) -> Task<Error?, Never> {
+    Task {
+        var iterator = stream.makeAsyncIterator()
+        do {
+            while try await iterator.next() != nil {}
+            return nil
+        } catch {
+            return error
+        }
     }
 }
 

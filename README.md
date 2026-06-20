@@ -26,8 +26,8 @@ and an internal terminal screen projection.
 
 `MoshSession` exposes raw keystroke sending, terminal-input translation that
 uses the session-owned screen state, resize sending, async host operation and
-render operation streams, diagnostic events, protocol snapshots, and a
-renderer-ready screen snapshot.
+render operation streams, diagnostic events including typed screen projection
+failures, protocol snapshots, and a renderer-ready screen snapshot.
 
 The package is still under active compatibility work. Real `mosh-server`
 validation lives in the parent workspace matrix while protocol, roaming, and

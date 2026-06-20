@@ -74,10 +74,43 @@ public enum MoshSessionError: Error, Equatable, Sendable {
     case timerExpiredWithoutDueDatagram
 }
 
+public enum MoshSessionScreenProjectionFailureReason: Equatable, Sendable {
+    case terminalInputParser(MoshTerminalInputParserError)
+    case unclassified(String)
+
+    init(error: Error) {
+        if let parserError = error as? MoshTerminalInputParserError {
+            self = .terminalInputParser(parserError)
+        } else {
+            self = .unclassified(String(describing: error))
+        }
+    }
+}
+
+public struct MoshSessionScreenProjectionFailure: Error, Equatable, Sendable {
+    public let stateNumber: UInt64
+    public let operationIndex: Int
+    public let operation: MoshTerminalRenderOperation
+    public let reason: MoshSessionScreenProjectionFailureReason
+
+    public init(
+        stateNumber: UInt64,
+        operationIndex: Int,
+        operation: MoshTerminalRenderOperation,
+        reason: MoshSessionScreenProjectionFailureReason
+    ) {
+        self.stateNumber = stateNumber
+        self.operationIndex = operationIndex
+        self.operation = operation
+        self.reason = reason
+    }
+}
+
 public enum MoshSessionEvent: Equatable, Sendable {
     case started(MoshEndpoint)
     case datagramsSent(packetCount: Int)
     case hostStateReceived(number: UInt64, operationCount: Int)
+    case screenProjectionFailed(MoshSessionScreenProjectionFailure)
     case stopped
 }
 
@@ -293,10 +326,21 @@ public actor MoshSession {
     ) throws {
         let state = instruction.instructionResult.latestState
         let operations = self.terminalEngine.acceptHostState(state.state)
-        for operation in operations {
+        for (operationIndex, operation) in operations.enumerated() {
             let renderOperation = MoshTerminalRenderOperation(operation)
             if let renderOperation {
-                try self.terminalScreen.apply(renderOperation)
+                do {
+                    try self.terminalScreen.apply(renderOperation)
+                } catch {
+                    let failure = MoshSessionScreenProjectionFailure(
+                        stateNumber: state.number,
+                        operationIndex: operationIndex,
+                        operation: renderOperation,
+                        reason: MoshSessionScreenProjectionFailureReason(error: error)
+                    )
+                    self.diagnosticEventContinuation.yield(.screenProjectionFailed(failure))
+                    throw failure
+                }
             }
             self.hostOperationContinuation.yield(operation)
             if let renderOperation {
