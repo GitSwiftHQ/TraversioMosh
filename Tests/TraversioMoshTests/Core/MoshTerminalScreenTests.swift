@@ -1174,6 +1174,18 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func sgrFaintCodeIsIgnoredToMatchOfficialRenditions() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2mA\u{1b}[1mB\u{1b}[22mC".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["ABC"])
+        #expect(screen.snapshot.rows[0][0].attributes.intensity == .normal)
+        #expect(screen.snapshot.rows[0][1].attributes.intensity == .bold)
+        #expect(screen.snapshot.rows[0][2].attributes.intensity == .normal)
+    }
+
+    @Test
     func sgrBlinkAndInvisibleFollowOfficialRenditionSetAndResetCodes() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 

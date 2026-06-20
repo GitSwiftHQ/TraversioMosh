@@ -1661,8 +1661,6 @@ public struct MoshTerminalScreen: Sendable {
                 self.currentAttributes = .default
             case 1:
                 self.currentAttributes.intensity = .bold
-            case 2:
-                self.currentAttributes.intensity = .faint
             case 22:
                 self.currentAttributes.intensity = .normal
             case 3:

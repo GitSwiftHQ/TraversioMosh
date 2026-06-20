@@ -23,7 +23,6 @@ public enum MoshTerminalColor: Equatable, Sendable {
 public enum MoshTerminalIntensity: Equatable, Sendable {
     case normal
     case bold
-    case faint
 }
 
 public struct MoshTerminalTextAttributes: Equatable, Sendable {
