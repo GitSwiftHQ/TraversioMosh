@@ -666,6 +666,136 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func oscTitleCommandsUpdateSnapshotMetadata() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}]0;both\u{07}".utf8)))
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "both")
+        #expect(screen.snapshot.windowTitle == "both")
+        #expect(screen.snapshot.lineStrings == ["A       "])
+        #expect(screen.snapshot.bellCount == 0)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}]1;icon\u{1b}\\\u{1b}]2;window\u{07}".utf8)))
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "icon")
+        #expect(screen.snapshot.windowTitle == "window")
+        #expect(screen.snapshot.lineStrings == ["A       "])
+    }
+
+    @Test
+    func implicitOSCTitleCommandSetsIconAndWindowTitle() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}];implicit\u{07}".utf8)))
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "implicit")
+        #expect(screen.snapshot.windowTitle == "implicit")
+        #expect(screen.snapshot.lineStrings == ["    "])
+    }
+
+    @Test
+    func oscTitleTruncatesToOfficialLimit() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+        let longTitle = String(repeating: "a", count: 300)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}]2;\(longTitle)\u{07}".utf8)))
+
+        #expect(screen.snapshot.windowTitle == String(repeating: "a", count: 254))
+        #expect(screen.snapshot.iconName == "")
+        #expect(screen.snapshot.titleInitialized == true)
+    }
+
+    @Test
+    func oscClipboardUpdatesSnapshotWithoutRendering() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}]52;c;payload\u{07}X".utf8)))
+
+        #expect(screen.snapshot.clipboard == "payload")
+        #expect(screen.snapshot.lineStrings == ["X   "])
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
+    func osc8HyperlinkAppliesToPrintedCellsAndCanClear() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+        let link = MoshTerminalHyperlink(parameters: "id=1", url: "https://example.test")
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("\u{1b}]8;id=1;https://example.test\u{1b}\\A\u{1b}]8;;\u{1b}\\B".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["AB  "])
+        #expect(screen.snapshot.rows[0][0].hyperlink == link)
+        #expect(screen.snapshot.rows[0][1].hyperlink == nil)
+        #expect(screen.snapshot.currentHyperlink == nil)
+    }
+
+    @Test
+    func osc8RejectsNonASCIIPayloadWithoutChangingCurrentHyperlink() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+        let link = MoshTerminalHyperlink(parameters: "id=1", url: "https://example.test")
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("\u{1b}]8;id=1;https://example.test\u{1b}\\A\u{1b}]8;id=2;https://例.test\u{1b}\\B".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["AB  "])
+        #expect(screen.snapshot.rows[0][0].hyperlink == link)
+        #expect(screen.snapshot.rows[0][1].hyperlink == link)
+        #expect(screen.snapshot.currentHyperlink == link)
+    }
+
+    @Test
+    func resetClearsWindowTitleClipboardAndCurrentHyperlinkLikeOfficialFramebuffer() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    "\u{1b}]0;both\u{07}\u{1b}]52;c;payload\u{07}\u{1b}]8;id=1;https://example.test\u{1b}\\\u{1b}cX".utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "both")
+        #expect(screen.snapshot.windowTitle == "")
+        #expect(screen.snapshot.clipboard == "")
+        #expect(screen.snapshot.currentHyperlink == nil)
+        #expect(screen.snapshot.rows[0][0].hyperlink == nil)
+        #expect(screen.snapshot.lineStrings == ["X   "])
+    }
+
+    @Test
+    func softResetClearsCurrentHyperlinkButPreservesTitleAndClipboard() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    "\u{1b}]2;title\u{07}\u{1b}]52;c;payload\u{07}\u{1b}]8;id=1;https://example.test\u{1b}\\\u{1b}[!pX".utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.windowTitle == "title")
+        #expect(screen.snapshot.clipboard == "payload")
+        #expect(screen.snapshot.currentHyperlink == nil)
+        #expect(screen.snapshot.rows[0][0].hyperlink == nil)
+        #expect(screen.snapshot.lineStrings == ["X   "])
+    }
+
+    @Test
     func stringControlC1STTerminatorEndsString() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
 

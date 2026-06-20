@@ -33,20 +33,33 @@ public enum MoshTerminalLineRendition: Equatable, Sendable {
     }
 }
 
+public struct MoshTerminalHyperlink: Equatable, Sendable {
+    public let parameters: String
+    public let url: String
+
+    public init(parameters: String, url: String) {
+        self.parameters = parameters
+        self.url = url
+    }
+}
+
 public struct MoshTerminalCell: Equatable, Sendable {
     public static let blank = MoshTerminalCell(contents: " ")
 
     public let contents: String
     public let attributes: MoshTerminalTextAttributes
+    public let hyperlink: MoshTerminalHyperlink?
     public let displayWidth: Int
     public let isContinuation: Bool
 
     public init(
         contents: String,
-        attributes: MoshTerminalTextAttributes = .default
+        attributes: MoshTerminalTextAttributes = .default,
+        hyperlink: MoshTerminalHyperlink? = nil
     ) {
         self.contents = contents
         self.attributes = attributes
+        self.hyperlink = hyperlink
         self.displayWidth = 1
         self.isContinuation = false
     }
@@ -54,10 +67,12 @@ public struct MoshTerminalCell: Equatable, Sendable {
     init(
         scalar: Unicode.Scalar,
         attributes: MoshTerminalTextAttributes,
+        hyperlink: MoshTerminalHyperlink?,
         displayWidth: Int
     ) {
         self.contents = String(scalar)
         self.attributes = attributes
+        self.hyperlink = hyperlink
         self.displayWidth = displayWidth
         self.isContinuation = false
     }
@@ -65,19 +80,25 @@ public struct MoshTerminalCell: Equatable, Sendable {
     private init(
         contents: String,
         attributes: MoshTerminalTextAttributes,
+        hyperlink: MoshTerminalHyperlink?,
         displayWidth: Int,
         isContinuation: Bool
     ) {
         self.contents = contents
         self.attributes = attributes
+        self.hyperlink = hyperlink
         self.displayWidth = displayWidth
         self.isContinuation = isContinuation
     }
 
-    static func continuation(attributes: MoshTerminalTextAttributes) -> MoshTerminalCell {
+    static func continuation(
+        attributes: MoshTerminalTextAttributes,
+        hyperlink: MoshTerminalHyperlink?
+    ) -> MoshTerminalCell {
         MoshTerminalCell(
             contents: " ",
             attributes: attributes,
+            hyperlink: hyperlink,
             displayWidth: 0,
             isContinuation: true
         )
@@ -87,6 +108,7 @@ public struct MoshTerminalCell: Equatable, Sendable {
         MoshTerminalCell(
             contents: self.contents + String(scalar),
             attributes: self.attributes,
+            hyperlink: self.hyperlink,
             displayWidth: self.displayWidth,
             isContinuation: self.isContinuation
         )
@@ -98,6 +120,11 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
     public let cursor: MoshTerminalCursor
     public let isCursorVisible: Bool
     public let bellCount: UInt64
+    public let titleInitialized: Bool
+    public let iconName: String
+    public let windowTitle: String
+    public let clipboard: String
+    public let currentHyperlink: MoshTerminalHyperlink?
     public let rows: [[MoshTerminalCell]]
     public let lineRenditions: [MoshTerminalLineRendition]
 
@@ -106,6 +133,11 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
         cursor: MoshTerminalCursor,
         isCursorVisible: Bool = true,
         bellCount: UInt64 = 0,
+        titleInitialized: Bool = false,
+        iconName: String = "",
+        windowTitle: String = "",
+        clipboard: String = "",
+        currentHyperlink: MoshTerminalHyperlink? = nil,
         rows: [[MoshTerminalCell]],
         lineRenditions: [MoshTerminalLineRendition]? = nil
     ) {
@@ -113,6 +145,11 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
         self.cursor = cursor
         self.isCursorVisible = isCursorVisible
         self.bellCount = bellCount
+        self.titleInitialized = titleInitialized
+        self.iconName = iconName
+        self.windowTitle = windowTitle
+        self.clipboard = clipboard
+        self.currentHyperlink = currentHyperlink
         self.rows = rows
         self.lineRenditions = Self.normalizedLineRenditions(
             lineRenditions,
@@ -140,6 +177,9 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
 }
 
 public struct MoshTerminalScreen: Sendable {
+    private static let maximumStringControlPayloadScalars = 16 * 1024
+    private static let maximumOSCTitleScalars = 256
+
     public private(set) var dimensions: MoshTerminalDimensions
     public private(set) var cursor: MoshTerminalCursor
 
@@ -160,6 +200,11 @@ public struct MoshTerminalScreen: Sendable {
     private var insertMode: Bool
     private var isCursorVisible: Bool
     private var bellCount: UInt64
+    private var titleInitialized: Bool
+    private var iconName: String
+    private var windowTitle: String
+    private var clipboard: String
+    private var currentHyperlink: MoshTerminalHyperlink?
     private var g0CharacterSet: MoshTerminalCharacterSet
     private var g1CharacterSet: MoshTerminalCharacterSet
     private var activeCharacterSetSlot: MoshTerminalCharacterSetSlot
@@ -184,6 +229,11 @@ public struct MoshTerminalScreen: Sendable {
         self.insertMode = false
         self.isCursorVisible = true
         self.bellCount = 0
+        self.titleInitialized = false
+        self.iconName = ""
+        self.windowTitle = ""
+        self.clipboard = ""
+        self.currentHyperlink = nil
         self.g0CharacterSet = .usASCII
         self.g1CharacterSet = .usASCII
         self.activeCharacterSetSlot = .g0
@@ -195,6 +245,11 @@ public struct MoshTerminalScreen: Sendable {
             cursor: self.cursor,
             isCursorVisible: self.isCursorVisible,
             bellCount: self.bellCount,
+            titleInitialized: self.titleInitialized,
+            iconName: self.iconName,
+            windowTitle: self.windowTitle,
+            clipboard: self.clipboard,
+            currentHyperlink: self.currentHyperlink,
             rows: self.rows,
             lineRenditions: self.lineRenditions
         )
@@ -384,12 +439,14 @@ public struct MoshTerminalScreen: Sendable {
         self.rows[self.cursor.row][self.cursor.column] = MoshTerminalCell(
             scalar: scalar,
             attributes: self.currentAttributes,
+            hyperlink: self.currentHyperlink,
             displayWidth: displayWidth
         )
         if displayWidth == 2 {
             self.clearCellForWrite(row: self.cursor.row, column: self.cursor.column + 1)
             self.rows[self.cursor.row][self.cursor.column + 1] = .continuation(
-                attributes: self.currentAttributes
+                attributes: self.currentAttributes,
+                hyperlink: self.currentHyperlink
             )
         }
 
@@ -987,9 +1044,11 @@ public struct MoshTerminalScreen: Sendable {
     ) {
         switch token {
         case .control(.bell) where state.kind == .operatingSystemCommand:
+            self.finishStringControl(state)
             self.escapeState = nil
             return
         case .control(.c1(0x9c)):
+            self.finishStringControl(state)
             self.escapeState = nil
             return
         default:
@@ -998,11 +1057,12 @@ public struct MoshTerminalScreen: Sendable {
 
         if state.pendingEscape {
             if case .scalar("\\") = token {
+                self.finishStringControl(state)
                 self.escapeState = nil
                 return
             }
 
-            var nextState = state
+            var nextState = self.appendingStringControlPayload(token, to: state)
             nextState.pendingEscape = token == .control(.escape)
             self.escapeState = .stringControl(nextState)
             return
@@ -1014,7 +1074,105 @@ public struct MoshTerminalScreen: Sendable {
             nextState.pendingEscape = true
             self.escapeState = .stringControl(nextState)
         default:
-            self.escapeState = .stringControl(state)
+            self.escapeState = .stringControl(
+                self.appendingStringControlPayload(token, to: state)
+            )
+        }
+    }
+
+    private mutating func finishStringControl(_ state: StringControlState) {
+        guard state.kind == .operatingSystemCommand else {
+            return
+        }
+
+        self.dispatchOSC(state.payload)
+    }
+
+    private func appendingStringControlPayload(
+        _ token: MoshTerminalInputToken,
+        to state: StringControlState
+    ) -> StringControlState {
+        guard state.kind == .operatingSystemCommand,
+              state.payload.unicodeScalars.count < Self.maximumStringControlPayloadScalars,
+              case .scalar(let scalar) = token else {
+            return state
+        }
+
+        var nextState = state
+        nextState.payload.unicodeScalars.append(scalar)
+        return nextState
+    }
+
+    private mutating func dispatchOSC(_ payload: String) {
+        let scalars = Array(payload.unicodeScalars)
+
+        if scalars.count >= 5,
+           Self.isASCII(scalars[0], UInt8(ascii: "5")),
+           Self.isASCII(scalars[1], UInt8(ascii: "2")),
+           Self.isASCII(scalars[2], UInt8(ascii: ";")),
+           Self.isASCII(scalars[3], UInt8(ascii: "c")),
+           Self.isASCII(scalars[4], UInt8(ascii: ";")) {
+            self.clipboard = Self.string(from: scalars.dropFirst(5))
+            return
+        }
+
+        guard scalars.isEmpty == false else {
+            return
+        }
+
+        let command: Int
+        let offset: Int
+        if Self.isASCII(scalars[0], UInt8(ascii: ";")) {
+            command = 0
+            offset = 1
+        } else if scalars.count >= 2, Self.isASCII(scalars[1], UInt8(ascii: ";")) {
+            command = Int(scalars[0].value) - Int(UInt8(ascii: "0"))
+            offset = 2
+        } else {
+            return
+        }
+
+        if command == 8 {
+            self.dispatchOSC8(scalars)
+            return
+        }
+
+        let setIcon = command == 0 || command == 1
+        let setTitle = command == 0 || command == 2
+        guard setIcon || setTitle else {
+            return
+        }
+
+        self.titleInitialized = true
+        let end = min(scalars.count, Self.maximumOSCTitleScalars)
+        let title = offset < end ? Self.string(from: scalars[offset..<end]) : ""
+        if setIcon {
+            self.iconName = title
+        }
+        if setTitle {
+            self.windowTitle = title
+        }
+    }
+
+    private mutating func dispatchOSC8(_ scalars: [Unicode.Scalar]) {
+        guard scalars.allSatisfy({ (32...126).contains($0.value) }),
+              scalars.count > 2,
+              Self.isASCII(scalars[1], UInt8(ascii: ";")) else {
+            return
+        }
+
+        guard let secondSemicolon = scalars.indices.dropFirst(2).first(where: {
+            Self.isASCII(scalars[$0], UInt8(ascii: ";"))
+        }) else {
+            return
+        }
+
+        let parameters = Self.string(from: scalars[2..<secondSemicolon])
+        let url = Self.string(from: scalars[(secondSemicolon + 1)..<scalars.endIndex])
+        if url.isEmpty {
+            self.currentHyperlink = nil
+        } else {
+            self.currentHyperlink = MoshTerminalHyperlink(parameters: parameters, url: url)
         }
     }
 
@@ -1181,6 +1339,9 @@ public struct MoshTerminalScreen: Sendable {
         self.autoWrapMode = true
         self.insertMode = false
         self.isCursorVisible = true
+        self.windowTitle = ""
+        self.clipboard = ""
+        self.currentHyperlink = nil
         self.g0CharacterSet = .usASCII
         self.g1CharacterSet = .usASCII
         self.activeCharacterSetSlot = .g0
@@ -1195,6 +1356,7 @@ public struct MoshTerminalScreen: Sendable {
         self.originMode = false
         self.insertMode = false
         self.isCursorVisible = true
+        self.currentHyperlink = nil
     }
 
     private mutating func moveCursor(rowDelta: Int, columnDelta: Int) {
@@ -1517,6 +1679,18 @@ public struct MoshTerminalScreen: Sendable {
         return value
     }
 
+    private static func isASCII(_ scalar: Unicode.Scalar, _ byte: UInt8) -> Bool {
+        scalar.value == UInt32(byte)
+    }
+
+    private static func string<C: Collection>(from scalars: C) -> String where C.Element == Unicode.Scalar {
+        var string = ""
+        for scalar in scalars {
+            string.unicodeScalars.append(scalar)
+        }
+        return string
+    }
+
     fileprivate static func blankRows(dimensions: MoshTerminalDimensions) -> [[MoshTerminalCell]] {
         self.blankRows(rowCount: Int(dimensions.rows), columnCount: Int(dimensions.columns))
     }
@@ -1543,6 +1717,7 @@ public struct MoshTerminalScreen: Sendable {
         let cell = MoshTerminalCell(
             scalar: "E",
             attributes: .default,
+            hyperlink: nil,
             displayWidth: 1
         )
         return (0..<Int(dimensions.rows)).map { _ in
@@ -1610,7 +1785,10 @@ public struct MoshTerminalScreen: Sendable {
                 row[column] = .blank
             } else {
                 for continuationColumn in (column + 1)..<(column + row[column].displayWidth) {
-                    row[continuationColumn] = .continuation(attributes: row[column].attributes)
+                    row[continuationColumn] = .continuation(
+                        attributes: row[column].attributes,
+                        hyperlink: row[column].hyperlink
+                    )
                 }
             }
         }
@@ -1749,6 +1927,7 @@ private enum StringControlKind: Equatable, Sendable {
 private struct StringControlState: Equatable, Sendable {
     var kind: StringControlKind
     var pendingEscape = false
+    var payload = ""
 }
 
 private struct MoshTerminalScrollRegion: Equatable, Sendable {
