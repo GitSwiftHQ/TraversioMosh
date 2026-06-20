@@ -88,6 +88,75 @@ struct MoshSessionTests {
     }
 
     @Test
+    func terminalInputTranslatesSplitCursorKeySequenceBeforeClientState() async throws {
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24)
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 3)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            try await fixture.session.sendTerminalInput([0x1b], applicationCursorKeysEnabled: false)
+            try await fixture.session.sendTerminalInput([UInt8(ascii: "O")], applicationCursorKeysEnabled: false)
+            try await fixture.session.sendTerminalInput([UInt8(ascii: "A")], applicationCursorKeysEnabled: false)
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let finalState = try #require(serverInstructions.last).instructionResult.latestState.state
+
+            #expect(
+                finalState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 80, rows: 24)),
+                    .keystrokes([0x1b]),
+                    .keystrokes([UInt8(ascii: "["), UInt8(ascii: "A")]),
+                ]
+            )
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            serverInstructionTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
+    func rawKeystrokesDoNotApplyTerminalInputTranslation() async throws {
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24)
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            try await fixture.session.sendKeystrokes([0x1b, UInt8(ascii: "O"), UInt8(ascii: "A")])
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let finalState = try #require(serverInstructions.last).instructionResult.latestState.state
+
+            #expect(
+                finalState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 80, rows: 24)),
+                    .keystrokes([0x1b, UInt8(ascii: "O"), UInt8(ascii: "A")]),
+                ]
+            )
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            serverInstructionTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
     func hostOperationStreamYieldsServerStateOperations() async throws {
         let fixture = try await makeSessionFixture(columns: 80, rows: 24)
         let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)

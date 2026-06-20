@@ -96,6 +96,7 @@ public actor MoshSession {
     private let diagnosticEventContinuation: DiagnosticEventStream.Continuation
 
     private var terminalEngine: MoshTerminalStateEngine
+    private var userInputTranslator: MoshTerminalUserInputTranslator
     private var runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>?
     private var receiveTask: Task<Void, Never>?
     private var maintenanceTask: Task<Void, Never>?
@@ -124,6 +125,7 @@ public actor MoshSession {
         var terminalEngine = MoshTerminalStateEngine()
         terminalEngine.enqueueClientOperation(.resize(configuration.initialTerminalDimensions))
         self.terminalEngine = terminalEngine
+        self.userInputTranslator = MoshTerminalUserInputTranslator()
     }
 
     deinit {
@@ -207,6 +209,26 @@ public actor MoshSession {
         }
 
         try await self.updateClientState(.keystrokes(bytes))
+    }
+
+    public func sendTerminalInput(
+        _ bytes: [UInt8],
+        applicationCursorKeysEnabled: Bool
+    ) async throws {
+        guard bytes.isEmpty == false else {
+            return
+        }
+
+        try self.requireStarted()
+        let translatedBytes = self.userInputTranslator.translate(
+            bytes,
+            applicationCursorKeysEnabled: applicationCursorKeysEnabled
+        )
+        guard translatedBytes.isEmpty == false else {
+            return
+        }
+
+        try await self.updateClientState(.keystrokes(translatedBytes))
     }
 
     public func resize(columns: Int32, rows: Int32) async throws {
