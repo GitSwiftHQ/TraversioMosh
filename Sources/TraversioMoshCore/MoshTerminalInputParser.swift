@@ -30,7 +30,7 @@ public enum MoshTerminalControl: Equatable, Sendable {
             return .backspace
         case 0x09:
             return .horizontalTab
-        case 0x0a:
+        case 0x0a, 0x0b, 0x0c:
             return .lineFeed
         case 0x0d:
             return .carriageReturn

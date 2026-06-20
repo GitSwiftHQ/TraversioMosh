@@ -16,6 +16,8 @@ struct MoshTerminalInputParserTests {
             0x08,
             0x0d,
             0x0a,
+            0x0b,
+            0x0c,
             0x1b,
             0x7f,
         ])
@@ -24,6 +26,8 @@ struct MoshTerminalInputParserTests {
             .scalar("A"),
             .control(.backspace),
             .control(.carriageReturn),
+            .control(.lineFeed),
+            .control(.lineFeed),
             .control(.lineFeed),
             .control(.escape),
             .control(.delete),

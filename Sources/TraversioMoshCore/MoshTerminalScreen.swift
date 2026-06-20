@@ -413,6 +413,9 @@ public struct MoshTerminalScreen: Sendable {
             break
         case .c0(let byte):
             switch byte {
+            case 0x0b, 0x0c:
+                self.wrapPending = false
+                self.index()
             case 0x0e:
                 self.activeCharacterSetSlot = .g1
             case 0x0f:
@@ -423,15 +426,19 @@ public struct MoshTerminalScreen: Sendable {
         case .c1(let byte):
             switch byte {
             case 0x84:
+                self.wrapPending = false
                 self.index()
             case 0x85:
+                self.wrapPending = false
                 self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
                 self.index()
             case 0x8d:
+                self.wrapPending = false
                 self.reverseIndex()
             case 0x90:
                 self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
             case 0x88:
+                self.wrapPending = false
                 self.setTabStop()
             case 0x9b:
                 self.escapeState = .csi(CSIState())

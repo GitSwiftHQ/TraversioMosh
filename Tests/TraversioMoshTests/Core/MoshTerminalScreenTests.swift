@@ -79,6 +79,34 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func verticalTabAndFormFeedClearPendingWrapAndIndex() throws {
+        var verticalTabScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+        var formFeedScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try verticalTabScreen.apply(MoshTerminalOutput(bytes: Array("abcd\u{0b}X".utf8)))
+        try formFeedScreen.apply(MoshTerminalOutput(bytes: Array("abcd\u{0c}X".utf8)))
+
+        #expect(verticalTabScreen.snapshot.lineStrings == ["abcd", "   X"])
+        #expect(verticalTabScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
+        #expect(formFeedScreen.snapshot.lineStrings == ["abcd", "   X"])
+        #expect(formFeedScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
+    }
+
+    @Test
+    func c1IndexAndNextLineClearPendingWrapBeforeMoving() throws {
+        var indexScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 3))
+        var nextLineScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 3))
+
+        try indexScreen.apply(MoshTerminalOutput(bytes: Array("abcd".utf8) + [0xc2, 0x84] + Array("X".utf8)))
+        try nextLineScreen.apply(MoshTerminalOutput(bytes: Array("abcd".utf8) + [0xc2, 0x85] + Array("X".utf8)))
+
+        #expect(indexScreen.snapshot.lineStrings == ["abcd", "   X", "    "])
+        #expect(indexScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
+        #expect(nextLineScreen.snapshot.lineStrings == ["abcd", "X   ", "    "])
+        #expect(nextLineScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func cursorHorizontalTabulationDoesNotClearPendingWrap() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
