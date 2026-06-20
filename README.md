@@ -22,10 +22,11 @@ It currently includes tested bootstrap parsing, session-key validation,
 AES-128-OCB, packet nonce construction, protobuf2 wire messages, compression,
 fragmentation, SSP state handling, UDP datagram transport, encrypted datagram
 runtime, a public `MoshSession` facade, renderer-facing host operation streams,
-and an internal terminal screen projection.
+an internal terminal screen projection, and SSP graceful shutdown.
 
-`MoshSession` exposes raw keystroke sending, terminal-input translation that
-uses the session-owned screen state, resize sending, async host operation and
+`MoshSession` exposes raw keystroke sending, raw default terminal-input
+sending, explicit-mode terminal-input translation for callers that own that
+adapter boundary, resize sending, graceful shutdown, async host operation and
 render operation streams, diagnostic events including typed screen projection
 failures, protocol snapshots, and a renderer-ready screen snapshot.
 

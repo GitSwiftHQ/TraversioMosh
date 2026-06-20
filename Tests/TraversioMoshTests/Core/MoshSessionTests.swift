@@ -429,6 +429,9 @@ struct MoshSessionTests {
         await expectSessionError(.notStarted) {
             try await fixture.session.sendKeystrokes([0x61])
         }
+        await expectSessionError(.notStarted) {
+            try await fixture.session.shutdown()
+        }
 
         try await fixture.serverRuntime.start()
         try await fixture.session.start()
@@ -441,6 +444,9 @@ struct MoshSessionTests {
 
         await expectSessionError(.stopped) {
             try await fixture.session.sendKeystrokes([0x62])
+        }
+        await expectSessionError(.stopped) {
+            try await fixture.session.shutdown()
         }
 
         await fixture.serverRuntime.stop()
@@ -666,6 +672,60 @@ struct MoshSessionTests {
             await fixture.serverRuntime.stop()
         } catch {
             diagnosticEventTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
+    func shutdownSendsMaximumStateAndWaitsForAcknowledgement() async throws {
+        let timing = MoshSSPSendTimingConfiguration(
+            sendIntervalMilliseconds: 0,
+            acknowledgementIntervalMilliseconds: 1_000,
+            activeRetryTimeoutMilliseconds: 10_000,
+            sendMinimumDelayMilliseconds: 0,
+            timeoutMilliseconds: 1_000
+        )
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24, timing: timing)
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
+        var shutdownTask: Task<Void, Error>?
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+            shutdownTask = Task {
+                try await fixture.session.shutdown()
+            }
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let shutdownInstruction = try #require(serverInstructions.last)
+
+            #expect(shutdownInstruction.instructionResult.receiveResult == .accepted(newNumber: UInt64.max))
+            #expect(shutdownInstruction.instructionResult.instruction.newNumber == UInt64.max)
+            #expect(
+                shutdownInstruction.instructionResult.latestState.state.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 80, rows: 24))
+                ]
+            )
+
+            await fixture.clock.advance(byMilliseconds: MoshSSPSender<MoshTerminalHostState>.acknowledgementDelayMilliseconds)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            let shutdownTask = try #require(shutdownTask)
+            try await withSessionTimeout {
+                try await shutdownTask.value
+            }
+            await expectSessionError(.stopped) {
+                try await fixture.session.sendKeystrokes([0x61])
+            }
+
+            await fixture.serverRuntime.stop()
+        } catch {
+            shutdownTask?.cancel()
+            serverInstructionTask.cancel()
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
             throw error

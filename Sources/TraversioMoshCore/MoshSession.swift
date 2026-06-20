@@ -135,6 +135,9 @@ public actor MoshSession {
     private var receiveTask: Task<Void, Never>?
     private var maintenanceTask: Task<Void, Never>?
     private var maintenanceGeneration: UInt64 = 0
+    private var nextStopWaiterID: UInt64 = 0
+    private var stopWaiters: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var cancelledStopWaiterIDs: Set<UInt64> = []
     private var isStarted = false
     private var isStopped = false
 
@@ -240,8 +243,34 @@ public actor MoshSession {
         self.runtime = nil
         self.hostOperationContinuation.finish()
         self.renderOperationContinuation.finish()
+        self.finishStopWaiters(throwing: nil)
         self.diagnosticEventContinuation.yield(.stopped)
         self.diagnosticEventContinuation.finish()
+    }
+
+    public func shutdown() async throws {
+        try self.requireStarted()
+        guard let runtime = self.runtime else {
+            throw MoshSessionError.notStarted
+        }
+
+        do {
+            await runtime.startShutdown()
+            _ = try await self.sendDueDatagrams()
+            guard self.isStarted, self.isStopped == false else {
+                return
+            }
+            self.restartMaintenanceTask(runtime: runtime)
+            try await self.waitUntilStopped()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            await self.finishFromMaintenanceTask(
+                throwing: error,
+                generation: self.maintenanceGeneration
+            )
+            throw error
+        }
     }
 
     public func sendKeystrokes(_ bytes: [UInt8]) async throws {
@@ -320,7 +349,7 @@ public actor MoshSession {
 
     private func handleIncomingInstruction(
         _ instruction: MoshSSPDatagramIncomingInstruction<MoshTerminalHostState>
-    ) throws {
+    ) async throws {
         let state = instruction.instructionResult.latestState
         let operations = self.terminalEngine.acceptHostState(state.state)
         for (operationIndex, operation) in operations.enumerated() {
@@ -348,6 +377,10 @@ public actor MoshSession {
             .hostStateReceived(number: state.number, operationCount: operations.count)
         )
         if let runtime = self.runtime, self.isStarted, self.isStopped == false {
+            if await runtime.shutdownAcknowledged() {
+                await self.stop()
+                return
+            }
             self.restartMaintenanceTask(runtime: runtime)
         }
     }
@@ -370,6 +403,7 @@ public actor MoshSession {
             self.hostOperationContinuation.finish()
             self.renderOperationContinuation.finish()
         }
+        self.finishStopWaiters(throwing: error)
         self.diagnosticEventContinuation.yield(.stopped)
         self.diagnosticEventContinuation.finish()
     }
@@ -401,6 +435,7 @@ public actor MoshSession {
         self.runtime = nil
         self.hostOperationContinuation.finish(throwing: error)
         self.renderOperationContinuation.finish(throwing: error)
+        self.finishStopWaiters(throwing: error)
         self.diagnosticEventContinuation.yield(.stopped)
         self.diagnosticEventContinuation.finish()
     }
@@ -497,6 +532,61 @@ public actor MoshSession {
 
     private func shouldContinueMaintenance(generation: UInt64) -> Bool {
         self.isStarted && self.isStopped == false && self.maintenanceGeneration == generation
+    }
+
+    private func waitUntilStopped() async throws {
+        if self.isStopped {
+            return
+        }
+
+        let waiterID = self.nextStopWaiterID
+        self.nextStopWaiterID &+= 1
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                self.storeStopWaiter(id: waiterID, continuation: continuation)
+            }
+        } onCancel: {
+            Task {
+                await self.cancelStopWaiter(id: waiterID)
+            }
+        }
+    }
+
+    private func storeStopWaiter(
+        id: UInt64,
+        continuation: CheckedContinuation<Void, Error>
+    ) {
+        if self.isStopped {
+            continuation.resume()
+            return
+        }
+        if self.cancelledStopWaiterIDs.remove(id) != nil {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        self.stopWaiters[id] = continuation
+    }
+
+    private func cancelStopWaiter(id: UInt64) {
+        if let continuation = self.stopWaiters.removeValue(forKey: id) {
+            continuation.resume(throwing: CancellationError())
+        } else {
+            self.cancelledStopWaiterIDs.insert(id)
+        }
+    }
+
+    private func finishStopWaiters(throwing error: Error?) {
+        let waiters = Array(self.stopWaiters.values)
+        self.stopWaiters.removeAll()
+        self.cancelledStopWaiterIDs.removeAll()
+        for waiter in waiters {
+            if let error {
+                waiter.resume(throwing: error)
+            } else {
+                waiter.resume()
+            }
+        }
     }
 
     private static func makeHostOperationStream(
