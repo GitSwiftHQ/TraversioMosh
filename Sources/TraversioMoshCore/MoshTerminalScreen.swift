@@ -1130,12 +1130,6 @@ public struct MoshTerminalScreen: Sendable {
             self.moveCursor(rowDelta: 0, columnDelta: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "D"):
             self.moveCursor(rowDelta: 0, columnDelta: -Self.parameter(values, at: 0, default: 1))
-        case UInt8(ascii: "E"):
-            self.moveCursor(rowDelta: Self.parameter(values, at: 0, default: 1), columnDelta: 0)
-            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
-        case UInt8(ascii: "F"):
-            self.moveCursor(rowDelta: -Self.parameter(values, at: 0, default: 1), columnDelta: 0)
-            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
         case UInt8(ascii: "G"):
             self.setCursor(
                 row: self.cursor.row,
@@ -1177,15 +1171,11 @@ public struct MoshTerminalScreen: Sendable {
                 row: self.cursor.row,
                 column: Self.parameter(values, at: 0, default: 1) - 1
             )
-        case UInt8(ascii: "a"):
-            self.moveCursor(rowDelta: 0, columnDelta: Self.parameter(values, at: 0, default: 1))
         case UInt8(ascii: "d"):
             self.setPositionedCursor(
                 row: Self.parameter(values, at: 0, default: 1) - 1,
                 column: self.cursor.column
             )
-        case UInt8(ascii: "e"):
-            self.moveCursor(rowDelta: Self.parameter(values, at: 0, default: 1), columnDelta: 0)
         case UInt8(ascii: "g"):
             self.clearTabStops(
                 mode: Self.parameter(values, at: 0, default: 0),

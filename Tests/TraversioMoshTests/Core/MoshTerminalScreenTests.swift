@@ -672,29 +672,43 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
-    func csiNextAndPrecedingLineMoveToColumnZero() throws {
-        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 3))
+    func unregisteredNextAndPrecedingLineFinalsClearPendingWrapWithoutMoving() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
-        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4H\u{1b}[EZ\u{1b}[FQ".utf8)))
+        try screen.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[EX\u{1b}[FY".utf8)))
 
-        #expect(screen.snapshot.lineStrings == ["     ", "Q    ", "Z    "])
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+        #expect(screen.snapshot.lineStrings == ["abcY", "    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
     }
 
     @Test
-    func csiHorizontalAndVerticalPositioningMovesCursor() throws {
+    func csiHorizontalAndVerticalAbsolutePositioningMovesCursor() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 5))
 
-        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;2H\u{1b}[4`A\u{1b}[2aB\u{1b}[4dC\u{1b}[1eD".utf8)))
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;2H\u{1b}[4`A\u{1b}[4dB".utf8)))
 
         #expect(screen.snapshot.lineStrings == [
             "        ",
-            "   A  B ",
+            "   A    ",
             "        ",
-            "       C",
-            "       D"
+            "    B   ",
+            "        "
         ])
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: 7))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 3, column: 5))
+    }
+
+    @Test
+    func unregisteredRelativeHorizontalAndVerticalFinalsDoNotMoveCursor() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 3))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;2H\u{1b}[2aX\u{1b}[1eY".utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "     ",
+            " XY  ",
+            "     "
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
     }
 
     @Test
@@ -1072,22 +1086,6 @@ struct MoshTerminalScreenTests {
             "     "
         ])
         #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 4))
-    }
-
-    @Test
-    func cursorNextAndPrecedingLineStopAtScrollRegionMargins() throws {
-        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
-
-        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4r\u{1b}[3;3H\u{1b}[9EA\u{1b}[9FB".utf8)))
-
-        #expect(screen.snapshot.lineStrings == [
-            "     ",
-            "B    ",
-            "     ",
-            "A    ",
-            "     "
-        ])
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
     }
 
     @Test
