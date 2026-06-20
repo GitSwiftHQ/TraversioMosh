@@ -76,13 +76,16 @@ public struct MoshTerminalInputParser: Sendable {
                 continue
             }
 
-            switch try Self.decodeMultibyteScalar(from: input, at: index) {
+            switch Self.decodeMultibyteScalar(from: input, at: index) {
             case .complete(let scalar, let byteCount):
                 tokens.append(Self.token(forScalar: scalar))
                 index += byteCount
             case .incomplete:
                 self.pendingBytes = Array(input[index...])
                 return tokens
+            case .malformed(let byteCount):
+                tokens.append(.scalar(Self.replacementScalar))
+                index += byteCount
             }
         }
 
@@ -114,10 +117,12 @@ public struct MoshTerminalInputParser: Sendable {
         return .scalar(scalar)
     }
 
+    private static let replacementScalar = Unicode.Scalar(0xfffd)!
+
     private static func decodeMultibyteScalar(
         from input: [UInt8],
         at offset: Int
-    ) throws -> MultibyteDecodeResult {
+    ) -> MultibyteDecodeResult {
         let lead = input[offset]
         let expectedByteCount: Int
 
@@ -129,18 +134,20 @@ public struct MoshTerminalInputParser: Sendable {
         case 0xf0...0xf4:
             expectedByteCount = 4
         default:
-            throw MoshTerminalInputParserError.invalidUTF8(offset: offset)
+            return .malformed(byteCount: 1)
         }
 
-        guard input.count - offset >= expectedByteCount else {
+        let availableByteCount = input.count - offset
+        let availableEnd = min(input.count, offset + expectedByteCount)
+        let availableBytes = Array(input[offset..<availableEnd])
+        if let malformedByteCount = Self.malformedPrefixByteCount(availableBytes) {
+            return .malformed(byteCount: malformedByteCount)
+        }
+        guard availableByteCount >= expectedByteCount else {
             return .incomplete
         }
 
-        let bytes = Array(input[offset..<(offset + expectedByteCount)])
-        guard Self.hasValidContinuationBytes(bytes) else {
-            throw MoshTerminalInputParserError.invalidUTF8(offset: offset)
-        }
-
+        let bytes = availableBytes
         let value: UInt32
         switch expectedByteCount {
         case 2:
@@ -160,43 +167,65 @@ public struct MoshTerminalInputParser: Sendable {
         }
 
         guard let scalar = Unicode.Scalar(value) else {
-            throw MoshTerminalInputParserError.invalidUTF8(offset: offset)
+            return .malformed(byteCount: expectedByteCount)
         }
 
         return .complete(scalar, byteCount: expectedByteCount)
     }
 
-    private static func hasValidContinuationBytes(_ bytes: [UInt8]) -> Bool {
+    private static func malformedPrefixByteCount(_ bytes: [UInt8]) -> Int? {
+        guard bytes.count > 1 else {
+            return nil
+        }
+
         switch bytes[0] {
         case 0xc2...0xdf:
-            return Self.isContinuation(bytes[1])
+            return Self.isContinuation(bytes[1]) ? nil : 1
         case 0xe0:
-            return (0xa0...0xbf).contains(bytes[1])
-                && Self.isContinuation(bytes[2])
-        case 0xe1...0xec:
-            return Self.isContinuation(bytes[1])
-                && Self.isContinuation(bytes[2])
-        case 0xed:
-            return (0x80...0x9f).contains(bytes[1])
-                && Self.isContinuation(bytes[2])
-        case 0xee...0xef:
-            return Self.isContinuation(bytes[1])
-                && Self.isContinuation(bytes[2])
+            guard (0xa0...0xbf).contains(bytes[1]) else {
+                return 1
+            }
+            return Self.malformedAfterValidContinuationPrefix(bytes, expectedByteCount: 3)
+        case 0xe1...0xef:
+            guard Self.isContinuation(bytes[1]) else {
+                return 1
+            }
+            return Self.malformedAfterValidContinuationPrefix(bytes, expectedByteCount: 3)
         case 0xf0:
-            return (0x90...0xbf).contains(bytes[1])
-                && Self.isContinuation(bytes[2])
-                && Self.isContinuation(bytes[3])
+            guard (0x90...0xbf).contains(bytes[1]) else {
+                return 1
+            }
+            return Self.malformedAfterValidContinuationPrefix(bytes, expectedByteCount: 4)
         case 0xf1...0xf3:
-            return Self.isContinuation(bytes[1])
-                && Self.isContinuation(bytes[2])
-                && Self.isContinuation(bytes[3])
+            guard Self.isContinuation(bytes[1]) else {
+                return 1
+            }
+            return Self.malformedAfterValidContinuationPrefix(bytes, expectedByteCount: 4)
         case 0xf4:
-            return (0x80...0x8f).contains(bytes[1])
-                && Self.isContinuation(bytes[2])
-                && Self.isContinuation(bytes[3])
+            guard (0x80...0x8f).contains(bytes[1]) else {
+                return 1
+            }
+            return Self.malformedAfterValidContinuationPrefix(bytes, expectedByteCount: 4)
         default:
-            return false
+            return 1
         }
+    }
+
+    private static func malformedAfterValidContinuationPrefix(
+        _ bytes: [UInt8],
+        expectedByteCount: Int
+    ) -> Int? {
+        guard bytes.count > 2 else {
+            return nil
+        }
+
+        for index in 2..<min(bytes.count, expectedByteCount) {
+            guard Self.isContinuation(bytes[index]) else {
+                return index
+            }
+        }
+
+        return nil
     }
 
     private static func isContinuation(_ byte: UInt8) -> Bool {
@@ -207,4 +236,5 @@ public struct MoshTerminalInputParser: Sendable {
 private enum MultibyteDecodeResult {
     case complete(Unicode.Scalar, byteCount: Int)
     case incomplete
+    case malformed(byteCount: Int)
 }

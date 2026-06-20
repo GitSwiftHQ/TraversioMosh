@@ -89,24 +89,36 @@ struct MoshTerminalInputParserTests {
     }
 
     @Test
-    func rejectsInvalidContinuationBytes() {
+    func replacesInvalidContinuationBytesAndContinuesLikeOfficialMosh() throws {
         var parser = MoshTerminalInputParser()
 
-        #expect(throws: MoshTerminalInputParserError.invalidUTF8(offset: 0)) {
-            _ = try parser.parse([0xe2, 0x28, 0xa1])
-        }
+        let tokens = try parser.parse([0xe2, 0x28, 0xa1, 0x42])
+
+        #expect(tokens == [.scalar("\u{fffd}"), .scalar("("), .scalar("\u{fffd}"), .scalar("B")])
+        #expect(parser.pendingByteCount == 0)
     }
 
     @Test
-    func rejectsOverlongAndSurrogateSequences() {
+    func replacesInvalidLeadBytesLikeOfficialMosh() throws {
+        var parser = MoshTerminalInputParser()
+
+        let tokens = try parser.parse([0xff, 0x41])
+
+        #expect(tokens == [.scalar("\u{fffd}"), .scalar("A")])
+        #expect(parser.pendingByteCount == 0)
+    }
+
+    @Test
+    func replacesOverlongAndSurrogateSequencesLikeOfficialMosh() throws {
         var overlongParser = MoshTerminalInputParser()
         var surrogateParser = MoshTerminalInputParser()
 
-        #expect(throws: MoshTerminalInputParserError.invalidUTF8(offset: 0)) {
-            _ = try overlongParser.parse([0xc0, 0x80])
-        }
-        #expect(throws: MoshTerminalInputParserError.invalidUTF8(offset: 0)) {
-            _ = try surrogateParser.parse([0xed, 0xa0, 0x80])
-        }
+        let overlongTokens = try overlongParser.parse([0xc0, 0x80, 0x41])
+        let surrogateTokens = try surrogateParser.parse([0xed, 0xa0, 0x80, 0x42])
+
+        #expect(overlongTokens == [.scalar("\u{fffd}"), .scalar("\u{fffd}"), .scalar("A")])
+        #expect(surrogateTokens == [.scalar("\u{fffd}"), .scalar("B")])
+        #expect(overlongParser.pendingByteCount == 0)
+        #expect(surrogateParser.pendingByteCount == 0)
     }
 }

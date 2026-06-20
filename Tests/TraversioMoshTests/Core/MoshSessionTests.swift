@@ -592,19 +592,13 @@ struct MoshSessionTests {
     }
 
     @Test
-    func screenProjectionFailureEmitsTypedDiagnosticAndFinishesStreams() async throws {
+    func invalidUTF8HostOutputUsesReplacementWithoutProjectionFailure() async throws {
         let fixture = try await makeSessionFixture(columns: 3, rows: 2)
-        let diagnosticEventTask = collectEvents(from: fixture.session, count: 4)
-        let hostStreamFailureTask = collectStreamFailure(from: fixture.session.hostOperations)
-        let renderStreamFailureTask = collectStreamFailure(from: fixture.session.renderOperations)
-        let invalidOutput = MoshTerminalOutput(bytes: [0xff])
+        let diagnosticEventTask = collectEvents(from: fixture.session, count: 2)
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 1)
+        let renderOperationTask = collectRenderOperations(from: fixture.session, count: 1)
+        let invalidOutput = MoshTerminalOutput(bytes: [0xff, 0x58])
         let hostOperation = MoshHostOperation.write(invalidOutput)
-        let expectedFailure = MoshSessionScreenProjectionFailure(
-            stateNumber: 1,
-            operationIndex: 0,
-            operation: .write(invalidOutput),
-            reason: .terminalInputParser(.invalidUTF8(offset: 0))
-        )
 
         do {
             try await fixture.serverRuntime.start()
@@ -618,29 +612,29 @@ struct MoshSessionTests {
             let diagnosticEvents = try await withSessionTimeout {
                 await diagnosticEventTask.value
             }
-            let hostStreamError = try #require(await hostStreamFailureTask.value)
-            let hostFailure = try #require(hostStreamError as? MoshSessionScreenProjectionFailure)
-            let renderStreamError = try #require(await renderStreamFailureTask.value)
-            let renderFailure = try #require(renderStreamError as? MoshSessionScreenProjectionFailure)
+            let hostOperations = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            let renderOperations = try await withSessionTimeout {
+                try await renderOperationTask.value
+            }
 
             #expect(
                 diagnosticEvents == [
                     .started(fixture.endpoint),
                     .datagramsSent(packetCount: 1),
-                    .screenProjectionFailed(expectedFailure),
-                    .stopped,
                 ]
             )
-            #expect(hostFailure == expectedFailure)
-            #expect(renderFailure == expectedFailure)
-            #expect(await fixture.session.screenSnapshot.lineStrings == ["   ", "   "])
+            #expect(hostOperations == [hostOperation])
+            #expect(renderOperations == [.write(invalidOutput)])
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["\u{fffd}X ", "   "])
 
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
         } catch {
             diagnosticEventTask.cancel()
-            hostStreamFailureTask.cancel()
-            renderStreamFailureTask.cancel()
+            hostOperationTask.cancel()
+            renderOperationTask.cancel()
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
             throw error

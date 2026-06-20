@@ -2203,12 +2203,12 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
-    func invalidUTF8FromOutputFailsAtParserBoundary() throws {
-        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+    func invalidUTF8FromOutputRendersReplacementAndContinuesLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
 
-        #expect(throws: MoshTerminalInputParserError.invalidUTF8(offset: 0)) {
-            try screen.apply(MoshTerminalOutput(bytes: [0xe2, 0x28, 0xa1]))
-        }
-        #expect(screen.snapshot.lineStrings == ["   "])
+        try screen.apply(MoshTerminalOutput(bytes: [0xe2, 0x28, 0xa1, 0x58]))
+
+        #expect(screen.snapshot.lineStrings == ["\u{fffd}(\u{fffd}X "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
     }
 }
