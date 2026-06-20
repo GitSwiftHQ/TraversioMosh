@@ -681,7 +681,7 @@ struct MoshSessionTests {
     @Test
     func shutdownSendsMaximumStateAndWaitsForAcknowledgement() async throws {
         let timing = MoshSSPSendTimingConfiguration(
-            sendIntervalMilliseconds: 0,
+            sendIntervalMilliseconds: 20,
             acknowledgementIntervalMilliseconds: 1_000,
             activeRetryTimeoutMilliseconds: 10_000,
             sendMinimumDelayMilliseconds: 0,
@@ -694,15 +694,34 @@ struct MoshSessionTests {
         do {
             try await fixture.serverRuntime.start()
             try await fixture.session.start()
+
+            let initialSendWait = try await withSessionTimeout {
+                await fixture.timer.nextSleepRequest()
+            }
+            #expect(initialSendWait == 20)
+            await fixture.clock.advance(byMilliseconds: initialSendWait)
+            let resumedInitialSend = await fixture.timer.resumeNextSleep(milliseconds: initialSendWait)
+            try #require(resumedInitialSend)
+
             shutdownTask = Task {
                 try await fixture.session.shutdown()
             }
 
+            let shutdownSendWait = try await nextSleepRequest(
+                from: fixture.timer,
+                matching: 20
+            )
+            await fixture.clock.advance(byMilliseconds: shutdownSendWait)
+            let resumedShutdownSend = await fixture.timer.resumeNextSleep(milliseconds: shutdownSendWait)
+            try #require(resumedShutdownSend)
+
             let serverInstructions = try await withSessionTimeout {
                 try await serverInstructionTask.value
             }
+            let initialInstruction = try #require(serverInstructions.first)
             let shutdownInstruction = try #require(serverInstructions.last)
 
+            #expect(initialInstruction.instructionResult.receiveResult == .accepted(newNumber: 1))
             #expect(shutdownInstruction.instructionResult.receiveResult == .accepted(newNumber: UInt64.max))
             #expect(shutdownInstruction.instructionResult.instruction.newNumber == UInt64.max)
             #expect(
@@ -756,6 +775,7 @@ private actor ManualMillisecondsClock: MoshMillisecondsClock {
 private actor ManualSessionTimer: MoshSessionTimer {
     private var nextSleepID = 0
     private var pendingSleepOrder: [Int] = []
+    private var pendingSleepMilliseconds: [Int: UInt64] = [:]
     private var pendingSleepContinuations: [Int: CheckedContinuation<Void, Error>] = [:]
     private var cancelledSleepIDs: Set<Int> = []
     private var sleepRequests: [UInt64] = []
@@ -796,7 +816,21 @@ private actor ManualSessionTimer: MoshSessionTimer {
         }
 
         let sleepID = self.pendingSleepOrder.removeFirst()
+        self.pendingSleepMilliseconds.removeValue(forKey: sleepID)
         self.pendingSleepContinuations.removeValue(forKey: sleepID)?.resume()
+    }
+
+    func resumeNextSleep(milliseconds: UInt64) -> Bool {
+        guard let index = self.pendingSleepOrder.firstIndex(where: { sleepID in
+            self.pendingSleepMilliseconds[sleepID] == milliseconds
+        }) else {
+            return false
+        }
+
+        let sleepID = self.pendingSleepOrder.remove(at: index)
+        self.pendingSleepMilliseconds.removeValue(forKey: sleepID)
+        self.pendingSleepContinuations.removeValue(forKey: sleepID)?.resume()
+        return true
     }
 
     func pendingSleepCount() -> Int {
@@ -814,6 +848,7 @@ private actor ManualSessionTimer: MoshSessionTimer {
         }
 
         self.pendingSleepOrder.append(id)
+        self.pendingSleepMilliseconds[id] = milliseconds
         self.pendingSleepContinuations[id] = continuation
         self.publishSleepRequest(milliseconds)
     }
@@ -821,6 +856,7 @@ private actor ManualSessionTimer: MoshSessionTimer {
     private func cancelSleep(id: Int) {
         if let continuation = self.pendingSleepContinuations.removeValue(forKey: id) {
             self.pendingSleepOrder.removeAll { $0 == id }
+            self.pendingSleepMilliseconds.removeValue(forKey: id)
             continuation.resume(throwing: CancellationError())
         } else {
             self.cancelledSleepIDs.insert(id)
@@ -1017,6 +1053,20 @@ private func withSessionTimeout<T: Sendable>(
         }
         group.cancelAll()
         return result
+    }
+}
+
+private func nextSleepRequest(
+    from timer: ManualSessionTimer,
+    matching expectedMilliseconds: UInt64
+) async throws -> UInt64 {
+    try await withSessionTimeout {
+        while true {
+            let milliseconds = await timer.nextSleepRequest()
+            if milliseconds == expectedMilliseconds {
+                return milliseconds
+            }
+        }
     }
 }
 
