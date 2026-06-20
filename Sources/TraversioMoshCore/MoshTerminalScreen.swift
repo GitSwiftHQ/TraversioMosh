@@ -43,6 +43,22 @@ public struct MoshTerminalHyperlink: Equatable, Sendable {
     }
 }
 
+public enum MoshTerminalMouseReportingMode: Int, Equatable, Sendable {
+    case none = 0
+    case x10 = 9
+    case vt220 = 1000
+    case vt220Highlight = 1001
+    case buttonEvent = 1002
+    case anyEvent = 1003
+}
+
+public enum MoshTerminalMouseEncodingMode: Int, Equatable, Sendable {
+    case defaultMode = 0
+    case utf8 = 1005
+    case sgr = 1006
+    case urxvt = 1015
+}
+
 public struct MoshTerminalCell: Equatable, Sendable {
     public static let blank = MoshTerminalCell(contents: " ")
 
@@ -119,6 +135,13 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
     public let dimensions: MoshTerminalDimensions
     public let cursor: MoshTerminalCursor
     public let isCursorVisible: Bool
+    public let isReverseVideoEnabled: Bool
+    public let isBracketedPasteEnabled: Bool
+    public let mouseReportingMode: MoshTerminalMouseReportingMode
+    public let isMouseFocusEventEnabled: Bool
+    public let isMouseAlternateScrollEnabled: Bool
+    public let mouseEncodingMode: MoshTerminalMouseEncodingMode
+    public let isApplicationCursorKeysEnabled: Bool
     public let bellCount: UInt64
     public let titleInitialized: Bool
     public let iconName: String
@@ -132,6 +155,13 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
         dimensions: MoshTerminalDimensions,
         cursor: MoshTerminalCursor,
         isCursorVisible: Bool = true,
+        isReverseVideoEnabled: Bool = false,
+        isBracketedPasteEnabled: Bool = false,
+        mouseReportingMode: MoshTerminalMouseReportingMode = .none,
+        isMouseFocusEventEnabled: Bool = false,
+        isMouseAlternateScrollEnabled: Bool = false,
+        mouseEncodingMode: MoshTerminalMouseEncodingMode = .defaultMode,
+        isApplicationCursorKeysEnabled: Bool = false,
         bellCount: UInt64 = 0,
         titleInitialized: Bool = false,
         iconName: String = "",
@@ -144,6 +174,13 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
         self.dimensions = dimensions
         self.cursor = cursor
         self.isCursorVisible = isCursorVisible
+        self.isReverseVideoEnabled = isReverseVideoEnabled
+        self.isBracketedPasteEnabled = isBracketedPasteEnabled
+        self.mouseReportingMode = mouseReportingMode
+        self.isMouseFocusEventEnabled = isMouseFocusEventEnabled
+        self.isMouseAlternateScrollEnabled = isMouseAlternateScrollEnabled
+        self.mouseEncodingMode = mouseEncodingMode
+        self.isApplicationCursorKeysEnabled = isApplicationCursorKeysEnabled
         self.bellCount = bellCount
         self.titleInitialized = titleInitialized
         self.iconName = iconName
@@ -199,6 +236,13 @@ public struct MoshTerminalScreen: Sendable {
     private var autoWrapMode: Bool
     private var insertMode: Bool
     private var isCursorVisible: Bool
+    private var reverseVideo: Bool
+    private var bracketedPaste: Bool
+    private var mouseReportingMode: MoshTerminalMouseReportingMode
+    private var mouseFocusEvent: Bool
+    private var mouseAlternateScroll: Bool
+    private var mouseEncodingMode: MoshTerminalMouseEncodingMode
+    private var applicationCursorKeys: Bool
     private var bellCount: UInt64
     private var titleInitialized: Bool
     private var iconName: String
@@ -228,6 +272,13 @@ public struct MoshTerminalScreen: Sendable {
         self.autoWrapMode = true
         self.insertMode = false
         self.isCursorVisible = true
+        self.reverseVideo = false
+        self.bracketedPaste = false
+        self.mouseReportingMode = .none
+        self.mouseFocusEvent = false
+        self.mouseAlternateScroll = false
+        self.mouseEncodingMode = .defaultMode
+        self.applicationCursorKeys = false
         self.bellCount = 0
         self.titleInitialized = false
         self.iconName = ""
@@ -244,6 +295,13 @@ public struct MoshTerminalScreen: Sendable {
             dimensions: self.dimensions,
             cursor: self.cursor,
             isCursorVisible: self.isCursorVisible,
+            isReverseVideoEnabled: self.reverseVideo,
+            isBracketedPasteEnabled: self.bracketedPaste,
+            mouseReportingMode: self.mouseReportingMode,
+            isMouseFocusEventEnabled: self.mouseFocusEvent,
+            isMouseAlternateScrollEnabled: self.mouseAlternateScroll,
+            mouseEncodingMode: self.mouseEncodingMode,
+            isApplicationCursorKeysEnabled: self.applicationCursorKeys,
             bellCount: self.bellCount,
             titleInitialized: self.titleInitialized,
             iconName: self.iconName,
@@ -789,6 +847,10 @@ public struct MoshTerminalScreen: Sendable {
 
     private mutating func setPrivateMode(_ mode: Int, enabled: Bool) {
         switch mode {
+        case 1:
+            self.applicationCursorKeys = enabled
+        case 5:
+            self.reverseVideo = enabled
         case 6:
             self.originMode = enabled
             self.homeCursor()
@@ -797,8 +859,22 @@ public struct MoshTerminalScreen: Sendable {
             if enabled == false {
                 self.wrapPending = false
             }
+        case 9, 1000...1003:
+            self.mouseReportingMode = enabled
+                ? (MoshTerminalMouseReportingMode(rawValue: mode) ?? .none)
+                : .none
         case 25:
             self.isCursorVisible = enabled
+        case 1004:
+            self.mouseFocusEvent = enabled
+        case 1005, 1006, 1015:
+            self.mouseEncodingMode = enabled
+                ? (MoshTerminalMouseEncodingMode(rawValue: mode) ?? .defaultMode)
+                : .defaultMode
+        case 1007:
+            self.mouseAlternateScroll = enabled
+        case 2004:
+            self.bracketedPaste = enabled
         case 47, 1047:
             if enabled {
                 self.activateAlternateScreen(clear: false, saveCursor: false)
@@ -1339,6 +1415,13 @@ public struct MoshTerminalScreen: Sendable {
         self.autoWrapMode = true
         self.insertMode = false
         self.isCursorVisible = true
+        self.reverseVideo = false
+        self.bracketedPaste = false
+        self.mouseReportingMode = .none
+        self.mouseFocusEvent = false
+        self.mouseAlternateScroll = false
+        self.mouseEncodingMode = .defaultMode
+        self.applicationCursorKeys = false
         self.windowTitle = ""
         self.clipboard = ""
         self.currentHyperlink = nil
@@ -1356,6 +1439,7 @@ public struct MoshTerminalScreen: Sendable {
         self.originMode = false
         self.insertMode = false
         self.isCursorVisible = true
+        self.applicationCursorKeys = false
         self.currentHyperlink = nil
     }
 

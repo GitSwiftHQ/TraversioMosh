@@ -92,6 +92,116 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func privateDisplayModesUpdateSnapshotWithoutRendering() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("\u{1b}[?5h\u{1b}[?2004h\u{1b}[?1004h\u{1b}[?1007hAB".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["AB "])
+        #expect(screen.snapshot.isReverseVideoEnabled == true)
+        #expect(screen.snapshot.isBracketedPasteEnabled == true)
+        #expect(screen.snapshot.isMouseFocusEventEnabled == true)
+        #expect(screen.snapshot.isMouseAlternateScrollEnabled == true)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?5l\u{1b}[?2004l\u{1b}[?1004l\u{1b}[?1007l".utf8)))
+
+        #expect(screen.snapshot.isReverseVideoEnabled == false)
+        #expect(screen.snapshot.isBracketedPasteEnabled == false)
+        #expect(screen.snapshot.isMouseFocusEventEnabled == false)
+        #expect(screen.snapshot.isMouseAlternateScrollEnabled == false)
+    }
+
+    @Test
+    func privateMouseReportingModesFollowOfficialSetAndClear() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?9h".utf8)))
+        #expect(screen.snapshot.mouseReportingMode == .x10)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1002h".utf8)))
+        #expect(screen.snapshot.mouseReportingMode == .buttonEvent)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1000l".utf8)))
+        #expect(screen.snapshot.mouseReportingMode == .none)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1003h".utf8)))
+        #expect(screen.snapshot.mouseReportingMode == .anyEvent)
+    }
+
+    @Test
+    func privateMouseEncodingModesFollowOfficialSetAndClear() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1005h".utf8)))
+        #expect(screen.snapshot.mouseEncodingMode == .utf8)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1006h".utf8)))
+        #expect(screen.snapshot.mouseEncodingMode == .sgr)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1015h".utf8)))
+        #expect(screen.snapshot.mouseEncodingMode == .urxvt)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1006l".utf8)))
+        #expect(screen.snapshot.mouseEncodingMode == .defaultMode)
+    }
+
+    @Test
+    func applicationCursorKeysModeUpdatesAndSoftResetClearsOnlySoftResetModes() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("\u{1b}[?1h\u{1b}[?5h\u{1b}[?2004h\u{1b}[?1004h\u{1b}[?1006h\u{1b}[!p".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.isApplicationCursorKeysEnabled == false)
+        #expect(screen.snapshot.isReverseVideoEnabled == true)
+        #expect(screen.snapshot.isBracketedPasteEnabled == true)
+        #expect(screen.snapshot.isMouseFocusEventEnabled == true)
+        #expect(screen.snapshot.mouseEncodingMode == .sgr)
+    }
+
+    @Test
+    func resetRestoresPrivateDisplayAndInputModes() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    "\u{1b}[?1h\u{1b}[?5h\u{1b}[?2004h\u{1b}[?1003h\u{1b}[?1004h\u{1b}[?1007h\u{1b}[?1015h\u{1b}c".utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.isApplicationCursorKeysEnabled == false)
+        #expect(screen.snapshot.isReverseVideoEnabled == false)
+        #expect(screen.snapshot.isBracketedPasteEnabled == false)
+        #expect(screen.snapshot.mouseReportingMode == .none)
+        #expect(screen.snapshot.isMouseFocusEventEnabled == false)
+        #expect(screen.snapshot.isMouseAlternateScrollEnabled == false)
+        #expect(screen.snapshot.mouseEncodingMode == .defaultMode)
+    }
+
+    @Test
+    func privateModeSequencesDoNotClearPendingWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("abc\u{1b}[?5h\u{1b}[?2004h\u{1b}[?1004hX".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["abc", "X  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func bellControlIncrementsSnapshotCountWithoutRendering() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
