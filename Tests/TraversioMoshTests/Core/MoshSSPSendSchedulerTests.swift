@@ -9,6 +9,47 @@ import TraversioMoshWire
 
 struct MoshSSPSendSchedulerTests {
     @Test
+    func timestampReplySamplesUpdateOfficialRoundTripEstimator() {
+        var scheduler = MoshSSPSendScheduler(
+            initialState: ByteState(),
+            chaffSource: .none
+        )
+
+        #expect(scheduler.sendIntervalMilliseconds == 250)
+        #expect(scheduler.timeoutMilliseconds == 1_000)
+
+        scheduler.processPacketTimestampReply(80, nowMilliseconds: 200)
+
+        #expect(scheduler.smoothedRoundTripMilliseconds == 120)
+        #expect(scheduler.roundTripVariationMilliseconds == 60)
+        #expect(scheduler.sendIntervalMilliseconds == 60)
+        #expect(scheduler.timeoutMilliseconds == 360)
+
+        scheduler.processPacketTimestampReply(320, nowMilliseconds: 400)
+
+        #expect(abs(scheduler.smoothedRoundTripMilliseconds - 115) < 0.001)
+        #expect(abs(scheduler.roundTripVariationMilliseconds - 55) < 0.001)
+        #expect(scheduler.sendIntervalMilliseconds == 58)
+        #expect(scheduler.timeoutMilliseconds == 335)
+    }
+
+    @Test
+    func timestampReplyEstimatorIgnoresNoReplyAndLargeSamples() {
+        var scheduler = MoshSSPSendScheduler(
+            initialState: ByteState(),
+            chaffSource: .none
+        )
+
+        scheduler.processPacketTimestampReply(UInt16.max, nowMilliseconds: 200)
+        scheduler.processPacketTimestampReply(1_000, nowMilliseconds: 6_000)
+
+        #expect(scheduler.sendIntervalMilliseconds == 250)
+        #expect(scheduler.timeoutMilliseconds == 1_000)
+        #expect(scheduler.smoothedRoundTripMilliseconds == 1_000)
+        #expect(scheduler.roundTripVariationMilliseconds == 500)
+    }
+
+    @Test
     func localChangeWaitsForMinimumDelayAndSendInterval() throws {
         var scheduler = MoshSSPSendScheduler(
             initialState: ByteState(),

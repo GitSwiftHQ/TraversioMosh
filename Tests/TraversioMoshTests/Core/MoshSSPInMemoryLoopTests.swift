@@ -9,6 +9,71 @@ import TraversioMoshWire
 
 struct MoshSSPInMemoryLoopTests {
     @Test
+    func defaultTimingUsesOfficialInitialSendInterval() throws {
+        var loop = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            chaffSource: .none
+        )
+
+        loop.setCurrentState(ByteState([1]), nowMilliseconds: 0)
+
+        #expect(try loop.waitTime(nowMilliseconds: 0) == 250)
+        #expect(try loop.tick(nowMilliseconds: 249) == nil)
+
+        let batch = try #require(try loop.tick(nowMilliseconds: 250))
+
+        #expect(batch.instruction.newNumber == 1)
+        #expect(batch.instruction.diff == [1])
+    }
+
+    @Test
+    func timestampReplySampleControlsSendInterval() throws {
+        var loop = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            chaffSource: .none
+        )
+
+        loop.setCurrentState(ByteState([1]), nowMilliseconds: 0)
+        _ = try #require(try loop.tick(nowMilliseconds: 250))
+
+        try receiveTimestampReply(140, into: &loop, nowMilliseconds: 260)
+
+        loop.setCurrentState(ByteState([1, 2]), nowMilliseconds: 260)
+
+        #expect(try loop.waitTime(nowMilliseconds: 309) == 1)
+        #expect(try loop.tick(nowMilliseconds: 309) == nil)
+
+        let nextBatch = try #require(try loop.tick(nowMilliseconds: 310))
+
+        #expect(nextBatch.instruction.newNumber == 2)
+        #expect(nextBatch.instruction.diff?.isEmpty == false)
+    }
+
+    @Test
+    func timestampReplySampleControlsActiveRetryTimeout() throws {
+        var loop = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            chaffSource: .none
+        )
+
+        loop.setCurrentState(ByteState([1]), nowMilliseconds: 0)
+        _ = try #require(try loop.tick(nowMilliseconds: 250))
+
+        try receiveTimestampReply(140, into: &loop, nowMilliseconds: 260)
+
+        #expect(try loop.waitTime(nowMilliseconds: 709) == 1)
+        #expect(try loop.tick(nowMilliseconds: 709) == nil)
+
+        let retryBatch = try #require(try loop.tick(nowMilliseconds: 710))
+
+        #expect(retryBatch.instruction.newNumber == 1)
+        #expect(retryBatch.instruction.diff?.isEmpty == false)
+    }
+
+    @Test
     func fragmentedStateUpdateRoundTripsAndAcknowledges() throws {
         let noReplyTimestamp = UInt16.max
         var client = MoshSSPInMemoryLoop(
@@ -236,6 +301,38 @@ private func requireInstruction(
         throw TestFailure()
     }
     return instructionResult
+}
+
+private func receiveTimestampReply(
+    _ timestampReply: UInt16,
+    into loop: inout MoshSSPInMemoryLoop<ByteState, ByteState>,
+    nowMilliseconds: UInt64
+) throws {
+    var fragmenter = MoshFragmenter()
+    let instruction = MoshTransportInstruction(
+        protocolVersion: 2,
+        oldNumber: 99,
+        newNumber: 100,
+        acknowledgementNumber: 0,
+        throwawayNumber: 0,
+        diff: [0],
+        chaff: []
+    )
+    let fragment = try #require(
+        try fragmenter.makeFragments(
+            for: instruction,
+            maximumSerializedFragmentByteCount: 256
+        ).first
+    )
+    let packet = MoshPacketPlaintext(
+        timestamp: UInt16.max,
+        timestampReply: timestampReply,
+        payload: fragment.serializedBytes()
+    )
+
+    let result = try requireInstruction(try loop.receive(packet, nowMilliseconds: nowMilliseconds))
+
+    #expect(result.receiveResult == .missingReference(oldNumber: 99))
 }
 
 private struct TestFailure: Error {}

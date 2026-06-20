@@ -170,6 +170,10 @@ public struct MoshSSPInMemoryLoop<
                 receivedAtMilliseconds: nowMilliseconds
             )
         }
+        self.scheduler.processPacketTimestampReply(
+            packet.timestampReply,
+            nowMilliseconds: nowMilliseconds
+        )
         self.scheduler.noteRemoteHeard(nowMilliseconds: nowMilliseconds)
 
         let fragment = try MoshFragment(serializedBytes: packet.payload)

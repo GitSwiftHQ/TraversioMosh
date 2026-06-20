@@ -6,27 +6,154 @@
 import TraversioMoshWire
 
 public struct MoshSSPSendTimingConfiguration: Equatable, Sendable {
-    public var sendIntervalMilliseconds: UInt64
     public var acknowledgementIntervalMilliseconds: UInt64
     public var activeRetryTimeoutMilliseconds: UInt64
     public var sendMinimumDelayMilliseconds: UInt64
-    public var timeoutMilliseconds: UInt64
+    public var minimumSendIntervalMilliseconds: UInt64
+    public var maximumSendIntervalMilliseconds: UInt64
+    public var minimumTimeoutMilliseconds: UInt64
+    public var maximumTimeoutMilliseconds: UInt64
+    public var maximumRoundTripSampleMilliseconds: UInt64
+    public var initialSmoothedRoundTripMilliseconds: Double
+    public var initialRoundTripVariationMilliseconds: Double
     public var shutdownMaximumAttempts: Int
 
     public init(
-        sendIntervalMilliseconds: UInt64 = 20,
+        sendIntervalMilliseconds: UInt64? = nil,
         acknowledgementIntervalMilliseconds: UInt64 = 3_000,
         activeRetryTimeoutMilliseconds: UInt64 = 10_000,
         sendMinimumDelayMilliseconds: UInt64 = 8,
-        timeoutMilliseconds: UInt64 = 1_000,
-        shutdownMaximumAttempts: Int = 16
+        timeoutMilliseconds: UInt64? = nil,
+        shutdownMaximumAttempts: Int = 16,
+        minimumSendIntervalMilliseconds: UInt64 = 20,
+        maximumSendIntervalMilliseconds: UInt64 = 250,
+        minimumTimeoutMilliseconds: UInt64 = 50,
+        maximumTimeoutMilliseconds: UInt64 = 1_000,
+        maximumRoundTripSampleMilliseconds: UInt64 = 5_000,
+        initialSmoothedRoundTripMilliseconds: Double = 1_000,
+        initialRoundTripVariationMilliseconds: Double = 500
     ) {
-        self.sendIntervalMilliseconds = sendIntervalMilliseconds
         self.acknowledgementIntervalMilliseconds = acknowledgementIntervalMilliseconds
         self.activeRetryTimeoutMilliseconds = activeRetryTimeoutMilliseconds
         self.sendMinimumDelayMilliseconds = sendMinimumDelayMilliseconds
-        self.timeoutMilliseconds = timeoutMilliseconds
+        if let sendIntervalMilliseconds {
+            self.minimumSendIntervalMilliseconds = sendIntervalMilliseconds
+            self.maximumSendIntervalMilliseconds = sendIntervalMilliseconds
+            self.initialSmoothedRoundTripMilliseconds = Double(sendIntervalMilliseconds) * 2
+        } else {
+            self.minimumSendIntervalMilliseconds = minimumSendIntervalMilliseconds
+            self.maximumSendIntervalMilliseconds = max(
+                minimumSendIntervalMilliseconds,
+                maximumSendIntervalMilliseconds
+            )
+            self.initialSmoothedRoundTripMilliseconds = max(0, initialSmoothedRoundTripMilliseconds)
+        }
+        if let timeoutMilliseconds {
+            self.minimumTimeoutMilliseconds = timeoutMilliseconds
+            self.maximumTimeoutMilliseconds = timeoutMilliseconds
+            self.initialRoundTripVariationMilliseconds = max(
+                0,
+                (Double(timeoutMilliseconds) - self.initialSmoothedRoundTripMilliseconds) / 4
+            )
+        } else {
+            self.minimumTimeoutMilliseconds = minimumTimeoutMilliseconds
+            self.maximumTimeoutMilliseconds = max(
+                minimumTimeoutMilliseconds,
+                maximumTimeoutMilliseconds
+            )
+            self.initialRoundTripVariationMilliseconds = max(0, initialRoundTripVariationMilliseconds)
+        }
+        self.maximumRoundTripSampleMilliseconds = maximumRoundTripSampleMilliseconds
         self.shutdownMaximumAttempts = shutdownMaximumAttempts
+    }
+}
+
+struct MoshSSPRoundTripEstimator: Equatable, Sendable {
+    private let minimumSendIntervalMilliseconds: UInt64
+    private let maximumSendIntervalMilliseconds: UInt64
+    private let minimumTimeoutMilliseconds: UInt64
+    private let maximumTimeoutMilliseconds: UInt64
+    private let maximumRoundTripSampleMilliseconds: UInt64
+
+    private var hasRoundTripSample: Bool
+    private var smoothedRoundTripMillisecondsStorage: Double
+    private var roundTripVariationMillisecondsStorage: Double
+
+    init(timing: MoshSSPSendTimingConfiguration) {
+        self.minimumSendIntervalMilliseconds = timing.minimumSendIntervalMilliseconds
+        self.maximumSendIntervalMilliseconds = timing.maximumSendIntervalMilliseconds
+        self.minimumTimeoutMilliseconds = timing.minimumTimeoutMilliseconds
+        self.maximumTimeoutMilliseconds = timing.maximumTimeoutMilliseconds
+        self.maximumRoundTripSampleMilliseconds = timing.maximumRoundTripSampleMilliseconds
+        self.hasRoundTripSample = false
+        self.smoothedRoundTripMillisecondsStorage = timing.initialSmoothedRoundTripMilliseconds
+        self.roundTripVariationMillisecondsStorage = timing.initialRoundTripVariationMilliseconds
+    }
+
+    var smoothedRoundTripMilliseconds: Double {
+        self.smoothedRoundTripMillisecondsStorage
+    }
+
+    var roundTripVariationMilliseconds: Double {
+        self.roundTripVariationMillisecondsStorage
+    }
+
+    var sendIntervalMilliseconds: UInt64 {
+        self.clampedCeiling(
+            self.smoothedRoundTripMillisecondsStorage / 2,
+            lowerBound: self.minimumSendIntervalMilliseconds,
+            upperBound: self.maximumSendIntervalMilliseconds
+        )
+    }
+
+    var timeoutMilliseconds: UInt64 {
+        self.clampedCeiling(
+            self.smoothedRoundTripMillisecondsStorage + 4 * self.roundTripVariationMillisecondsStorage,
+            lowerBound: self.minimumTimeoutMilliseconds,
+            upperBound: self.maximumTimeoutMilliseconds
+        )
+    }
+
+    mutating func observePacketTimestampReply(
+        _ timestampReply: UInt16,
+        nowMilliseconds: UInt64
+    ) {
+        guard timestampReply != UInt16.max else {
+            return
+        }
+
+        let nowTimestamp = UInt16(truncatingIfNeeded: nowMilliseconds)
+        self.observeRoundTripSample(milliseconds: UInt64(nowTimestamp &- timestampReply))
+    }
+
+    private mutating func observeRoundTripSample(milliseconds sampleMilliseconds: UInt64) {
+        guard sampleMilliseconds < self.maximumRoundTripSampleMilliseconds else {
+            return
+        }
+
+        let sample = Double(sampleMilliseconds)
+        if self.hasRoundTripSample == false {
+            self.smoothedRoundTripMillisecondsStorage = sample
+            self.roundTripVariationMillisecondsStorage = sample / 2
+            self.hasRoundTripSample = true
+            return
+        }
+
+        let alpha = 1.0 / 8.0
+        let beta = 1.0 / 4.0
+        let oldSmoothedRoundTrip = self.smoothedRoundTripMillisecondsStorage
+        self.roundTripVariationMillisecondsStorage = (1 - beta) * self.roundTripVariationMillisecondsStorage
+            + beta * abs(oldSmoothedRoundTrip - sample)
+        self.smoothedRoundTripMillisecondsStorage = (1 - alpha) * oldSmoothedRoundTrip + alpha * sample
+    }
+
+    private func clampedCeiling(
+        _ value: Double,
+        lowerBound: UInt64,
+        upperBound: UInt64
+    ) -> UInt64 {
+        let rounded = UInt64(max(0, value.rounded(.up)))
+        return min(max(rounded, lowerBound), upperBound)
     }
 }
 
@@ -39,6 +166,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     public private(set) var sender: MoshSSPSender<State>
 
     private let timing: MoshSSPSendTimingConfiguration
+    private var roundTripEstimator: MoshSSPRoundTripEstimator
     private var nextAcknowledgementAtMilliseconds: UInt64
     private var nextSendAtMilliseconds: UInt64?
     private var firstPendingChangeAtMilliseconds: UInt64?
@@ -59,6 +187,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
             chaffSource: chaffSource
         )
         self.timing = timing
+        self.roundTripEstimator = MoshSSPRoundTripEstimator(timing: timing)
         self.nextAcknowledgementAtMilliseconds = Self.saturatingAdd(
             initialNowMilliseconds,
             timing.acknowledgementIntervalMilliseconds
@@ -83,6 +212,22 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         self.shutdownAttemptCountStorage
     }
 
+    public var sendIntervalMilliseconds: UInt64 {
+        self.roundTripEstimator.sendIntervalMilliseconds
+    }
+
+    public var timeoutMilliseconds: UInt64 {
+        self.roundTripEstimator.timeoutMilliseconds
+    }
+
+    public var smoothedRoundTripMilliseconds: Double {
+        self.roundTripEstimator.smoothedRoundTripMilliseconds
+    }
+
+    public var roundTripVariationMilliseconds: Double {
+        self.roundTripEstimator.roundTripVariationMilliseconds
+    }
+
     public mutating func startShutdown(nowMilliseconds: UInt64) {
         guard self.shutdownStartedAtMilliseconds == nil else {
             return
@@ -90,7 +235,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         self.shutdownStartedAtMilliseconds = nowMilliseconds
         self.nextAcknowledgementAtMilliseconds = min(
             self.nextAcknowledgementAtMilliseconds,
-            Self.saturatingAdd(self.sender.lastSentAtMilliseconds, self.timing.sendIntervalMilliseconds)
+            Self.saturatingAdd(self.sender.lastSentAtMilliseconds, self.sendIntervalMilliseconds)
         )
     }
 
@@ -129,6 +274,13 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         self.lastHeardAtMilliseconds = nowMilliseconds
     }
 
+    public mutating func processPacketTimestampReply(_ timestampReply: UInt16, nowMilliseconds: UInt64) {
+        self.roundTripEstimator.observePacketTimestampReply(
+            timestampReply,
+            nowMilliseconds: nowMilliseconds
+        )
+    }
+
     public mutating func processAcknowledgement(through acknowledgementNumber: UInt64, nowMilliseconds: UInt64) {
         self.sender.processAcknowledgement(through: acknowledgementNumber)
         self.lastHeardAtMilliseconds = nowMilliseconds
@@ -163,7 +315,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
 
         if let instruction = try self.sender.makeDataInstruction(
             nowMilliseconds: nowMilliseconds,
-            timeoutMilliseconds: self.timing.timeoutMilliseconds,
+            timeoutMilliseconds: self.timeoutMilliseconds,
             isShutdown: self.shutdownInProgress
         ) {
             self.recordInstructionSent(instruction, nowMilliseconds: nowMilliseconds)
@@ -173,7 +325,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         if acknowledgementDue {
             let instruction = try self.sender.makeAcknowledgementInstruction(
                 nowMilliseconds: nowMilliseconds,
-                timeoutMilliseconds: self.timing.timeoutMilliseconds,
+                timeoutMilliseconds: self.timeoutMilliseconds,
                 isShutdown: self.shutdownInProgress
             )
             self.recordInstructionSent(instruction, nowMilliseconds: nowMilliseconds)
@@ -188,7 +340,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     private mutating func recalculateTimers(nowMilliseconds: UInt64) throws {
         try self.sender.refreshAssumedReceiverState(
             nowMilliseconds: nowMilliseconds,
-            timeoutMilliseconds: self.timing.timeoutMilliseconds
+            timeoutMilliseconds: self.timeoutMilliseconds
         )
 
         if self.pendingDataAcknowledgement {
@@ -198,7 +350,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         if self.shutdownInProgress || self.sender.acknowledgementNumber == UInt64.max {
             self.nextAcknowledgementAtMilliseconds = Self.saturatingAdd(
                 self.sender.lastSentAtMilliseconds,
-                self.timing.sendIntervalMilliseconds
+                self.sendIntervalMilliseconds
             )
         }
 
@@ -213,7 +365,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
             )
             let intervalAt = Self.saturatingAdd(
                 self.sender.lastSentAtMilliseconds,
-                self.timing.sendIntervalMilliseconds
+                self.sendIntervalMilliseconds
             )
             self.nextSendAtMilliseconds = max(minimumDelayAt, intervalAt)
             return
@@ -222,7 +374,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         if self.sender.currentStateMatchesAssumedReceiverState == false && self.hasHeardRemoteRecently(nowMilliseconds) {
             var nextSendAtMilliseconds = Self.saturatingAdd(
                 self.sender.lastSentAtMilliseconds,
-                self.timing.sendIntervalMilliseconds
+                self.sendIntervalMilliseconds
             )
             if let firstPendingChangeAtMilliseconds {
                 nextSendAtMilliseconds = max(
@@ -236,9 +388,9 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
 
         if self.sender.currentStateMatchesKnownAcknowledgedState == false && self.hasHeardRemoteRecently(nowMilliseconds) {
             self.nextSendAtMilliseconds = Self.saturatingAdd(
-                self.sender.lastSentAtMilliseconds,
-                Self.saturatingAdd(
-                    self.timing.timeoutMilliseconds,
+                    self.sender.lastSentAtMilliseconds,
+                    Self.saturatingAdd(
+                    self.timeoutMilliseconds,
                     MoshSSPSender<State>.acknowledgementDelayMilliseconds
                 )
             )
