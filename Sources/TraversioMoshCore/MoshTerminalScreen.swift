@@ -459,7 +459,7 @@ public struct MoshTerminalScreen: Sendable {
             return
         }
 
-        if self.wrapPending {
+        if self.autoWrapMode && self.wrapPending {
             self.index()
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
             self.wrapPending = false
@@ -498,12 +498,13 @@ public struct MoshTerminalScreen: Sendable {
         let lastColumn = self.cursor.column + displayWidth - 1
         if lastColumn == self.currentMaximumColumn {
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: self.currentMaximumColumn)
-            self.wrapPending = self.autoWrapMode
+            self.wrapPending = true
         } else {
             self.cursor = MoshTerminalCursor(
                 row: self.cursor.row,
                 column: lastColumn + 1
             )
+            self.wrapPending = false
         }
     }
 
@@ -838,9 +839,6 @@ public struct MoshTerminalScreen: Sendable {
             self.homeCursor()
         case 7:
             self.autoWrapMode = enabled
-            if enabled == false {
-                self.wrapPending = false
-            }
         case 9, 1000...1003:
             self.mouseReportingMode = enabled
                 ? (MoshTerminalMouseReportingMode(rawValue: mode) ?? .none)
@@ -934,6 +932,7 @@ public struct MoshTerminalScreen: Sendable {
         case (.escape, .control(.c1(0x9f))):
             self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
         case (.escape, _):
+            self.wrapPending = false
             self.escapeState = nil
         case (.csi(let csiState), .scalar(let scalar)):
             self.consumeCSI(scalar: scalar, state: csiState)
@@ -966,6 +965,7 @@ public struct MoshTerminalScreen: Sendable {
         case (.escapeHash, .control(.escape)):
             self.escapeState = .escape
         case (.escapeHash, _):
+            self.wrapPending = false
             self.escapeState = nil
         case (.stringControl(let stringState), _):
             self.consumeStringControl(token: token, state: stringState)
@@ -1208,6 +1208,7 @@ public struct MoshTerminalScreen: Sendable {
         }
 
         guard intermediates.isEmpty else {
+            self.wrapPending = false
             return
         }
 
@@ -1311,6 +1312,7 @@ public struct MoshTerminalScreen: Sendable {
                 self.restoreCursorState()
             }
         default:
+            self.wrapPending = false
             break
         }
     }
