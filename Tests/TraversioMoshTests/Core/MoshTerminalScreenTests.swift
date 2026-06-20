@@ -529,13 +529,13 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
-    func alternateScreenPreservesLineRenditionsSeparately() throws {
+    func alternateScreenPrivateModesDoNotSeparateLineRenditions() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
         try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}#6\u{1b}[?1049h\u{1b}#3\u{1b}[?1049l".utf8)))
 
         #expect(screen.snapshot.lineRenditions == [
-            .doubleWidth,
+            .doubleHeightTop,
             .singleWidth
         ])
     }
@@ -1085,33 +1085,31 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
-    func alternateScreen1049ClearsAndRestoresNormalBufferCursorAndAttributes() throws {
+    func alternateScreenPrivateModesAreConsumedWithoutChangingScreenState() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
         try screen.apply(
             MoshTerminalOutput(
-                bytes: Array("main\u{1b}[2;3H\u{1b}[31mX\u{1b}[?1049halt\u{1b}[?1049lY".utf8)
+                bytes: Array("AB\u{1b}[?47hC\u{1b}[?1047hD\u{1b}[?1049h\u{1b}[?1049lE".utf8)
             )
         )
 
-        #expect(screen.snapshot.lineStrings == ["main", "  XY"])
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
-        #expect(screen.snapshot.rows[1][3].attributes.foregroundColor == .ansi(.red, isBright: false))
+        #expect(screen.snapshot.lineStrings == ["ABCD", "E   "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
     }
 
     @Test
-    func alternateScreenUsesSeparateSavedCursorState() throws {
+    func alternateScreenCursorSavePrivateModeIsConsumedWithoutRestoringCursor() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
 
         try screen.apply(
             MoshTerminalOutput(
-                bytes: Array("A\u{1b}[2;4H\u{1b}[31mN\u{1b}[?1049hQ\u{1b}7\u{1b}[1;5HR\u{1b}8S\u{1b}[?1049lY".utf8)
+                bytes: Array("A\u{1b}[2;4HN\u{1b}[?1048h\u{1b}[1;5HR\u{1b}[?1048lS".utf8)
             )
         )
 
-        #expect(screen.snapshot.lineStrings == ["A    ", "   NY"])
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 4))
-        #expect(screen.snapshot.rows[1][4].attributes.foregroundColor == .ansi(.red, isBright: false))
+        #expect(screen.snapshot.lineStrings == ["A   R", "S  N "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
     }
 
     @Test

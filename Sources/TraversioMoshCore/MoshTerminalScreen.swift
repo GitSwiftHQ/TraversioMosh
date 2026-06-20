@@ -225,10 +225,7 @@ public struct MoshTerminalScreen: Sendable {
     private var lineRenditions: [MoshTerminalLineRendition]
     private var scrollRegion: MoshTerminalScrollRegion
     private var currentAttributes: MoshTerminalTextAttributes
-    private var alternateBuffer: MoshTerminalScreenBuffer?
-    private var normalBuffer: MoshTerminalScreenBuffer?
     private var normalSavedCursorState: MoshTerminalSavedCursorState?
-    private var alternateSavedCursorState: MoshTerminalSavedCursorState?
     private var escapeState: EscapeState?
     private var wrapPending: Bool
     private var tabStops: Set<Int>
@@ -261,10 +258,7 @@ public struct MoshTerminalScreen: Sendable {
         self.lineRenditions = Self.defaultLineRenditions(rowCount: Int(dimensions.rows))
         self.scrollRegion = .full(rowCount: Int(dimensions.rows))
         self.currentAttributes = .default
-        self.alternateBuffer = nil
-        self.normalBuffer = nil
         self.normalSavedCursorState = nil
-        self.alternateSavedCursorState = nil
         self.escapeState = nil
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(dimensions.columns))
@@ -365,13 +359,7 @@ public struct MoshTerminalScreen: Sendable {
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.wrapPending = false
         self.tabStops = self.tabStops.filter { $0 <= self.maximumColumn }
-        self.alternateBuffer = self.alternateBuffer?.resized(to: dimensions)
-        self.normalBuffer = self.normalBuffer?.resized(to: dimensions)
         self.normalSavedCursorState = self.normalSavedCursorState?.clamped(
-            maximumRow: self.maximumRow,
-            maximumColumn: self.maximumColumn
-        )
-        self.alternateSavedCursorState = self.alternateSavedCursorState?.clamped(
             maximumRow: self.maximumRow,
             maximumColumn: self.maximumColumn
         )
@@ -831,17 +819,10 @@ public struct MoshTerminalScreen: Sendable {
 
     private var activeSavedCursorState: MoshTerminalSavedCursorState? {
         get {
-            if self.normalBuffer == nil {
-                return self.normalSavedCursorState
-            }
-            return self.alternateSavedCursorState
+            self.normalSavedCursorState
         }
         set {
-            if self.normalBuffer == nil {
-                self.normalSavedCursorState = newValue
-            } else {
-                self.alternateSavedCursorState = newValue
-            }
+            self.normalSavedCursorState = newValue
         }
     }
 
@@ -877,24 +858,6 @@ public struct MoshTerminalScreen: Sendable {
             self.mouseAlternateScroll = enabled
         case 2004:
             self.bracketedPaste = enabled
-        case 47, 1047:
-            if enabled {
-                self.activateAlternateScreen(clear: false, saveCursor: false)
-            } else {
-                self.restoreNormalScreen(clearAlternate: true, restoreCursor: false)
-            }
-        case 1048:
-            if enabled {
-                self.saveCursorState()
-            } else {
-                self.restoreCursorState()
-            }
-        case 1049:
-            if enabled {
-                self.activateAlternateScreen(clear: true, saveCursor: true)
-            } else {
-                self.restoreNormalScreen(clearAlternate: true, restoreCursor: true)
-            }
         default:
             break
         }
@@ -912,67 +875,6 @@ public struct MoshTerminalScreen: Sendable {
         default:
             break
         }
-    }
-
-    private mutating func activateAlternateScreen(clear: Bool, saveCursor: Bool) {
-        if saveCursor {
-            self.saveCursorState()
-        }
-
-        if self.normalBuffer == nil {
-            self.normalBuffer = self.activeBuffer
-            let nextBuffer: MoshTerminalScreenBuffer
-            if clear {
-                nextBuffer = .blank(dimensions: self.dimensions)
-            } else {
-                nextBuffer = self.alternateBuffer ?? .blank(dimensions: self.dimensions)
-            }
-            self.restoreScreenBuffer(nextBuffer)
-        } else {
-            if clear {
-                self.restoreScreenBuffer(.blank(dimensions: self.dimensions))
-            }
-        }
-    }
-
-    private mutating func restoreNormalScreen(
-        clearAlternate: Bool,
-        restoreCursor: Bool
-    ) {
-        if let normalBuffer {
-            self.alternateBuffer = clearAlternate ? .blank(dimensions: self.dimensions) : self.activeBuffer
-            if clearAlternate {
-                self.alternateSavedCursorState = nil
-            }
-            self.restoreScreenBuffer(normalBuffer)
-            self.normalBuffer = nil
-        }
-
-        if restoreCursor {
-            self.restoreCursorState()
-        }
-    }
-
-    private var activeBuffer: MoshTerminalScreenBuffer {
-        MoshTerminalScreenBuffer(
-            rows: self.rows,
-            lineRenditions: self.lineRenditions,
-            cursor: self.cursor,
-            scrollRegion: self.scrollRegion,
-            wrapPending: self.wrapPending
-        )
-    }
-
-    private mutating func restoreScreenBuffer(_ buffer: MoshTerminalScreenBuffer) {
-        self.rows = Self.resizedRows(buffer.rows, dimensions: self.dimensions)
-        self.lineRenditions = Self.resizedLineRenditions(
-            buffer.lineRenditions,
-            rowCount: self.rows.count
-        )
-        self.blankCellsPastEffectiveRightMargins()
-        self.cursor = self.clampedCursorForLineRendition(buffer.cursor)
-        self.scrollRegion = buffer.scrollRegion.clamped(rowCount: self.rows.count)
-        self.wrapPending = buffer.wrapPending
     }
 
     private mutating func consumeEscapeToken(_ token: MoshTerminalInputToken) {
@@ -1411,10 +1313,7 @@ public struct MoshTerminalScreen: Sendable {
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.currentAttributes = .default
-        self.alternateBuffer = nil
-        self.normalBuffer = nil
         self.normalSavedCursorState = nil
-        self.alternateSavedCursorState = nil
         self.escapeState = nil
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(self.dimensions.columns))
@@ -1441,7 +1340,6 @@ public struct MoshTerminalScreen: Sendable {
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.currentAttributes = .default
         self.normalSavedCursorState = nil
-        self.alternateSavedCursorState = nil
         self.wrapPending = false
         self.originMode = false
         self.insertMode = false
@@ -2052,43 +1950,6 @@ private struct MoshTerminalScrollRegion: Equatable, Sendable {
         let top = min(max(self.top, 0), maximumRow)
         let bottom = min(max(self.bottom, top), maximumRow)
         return MoshTerminalScrollRegion(top: top, bottom: bottom)
-    }
-}
-
-private struct MoshTerminalScreenBuffer: Equatable, Sendable {
-    var rows: [[MoshTerminalCell]]
-    var lineRenditions: [MoshTerminalLineRendition]
-    var cursor: MoshTerminalCursor
-    var scrollRegion: MoshTerminalScrollRegion
-    var wrapPending: Bool
-
-    static func blank(dimensions: MoshTerminalDimensions) -> MoshTerminalScreenBuffer {
-        let rows = MoshTerminalScreen.blankRows(dimensions: dimensions)
-        return MoshTerminalScreenBuffer(
-            rows: rows,
-            lineRenditions: MoshTerminalScreen.defaultLineRenditions(rowCount: rows.count),
-            cursor: MoshTerminalCursor(row: 0, column: 0),
-            scrollRegion: .full(rowCount: rows.count),
-            wrapPending: false
-        )
-    }
-
-    func resized(to dimensions: MoshTerminalDimensions) -> MoshTerminalScreenBuffer {
-        let rows = MoshTerminalScreen.resizedRows(self.rows, dimensions: dimensions)
-        return MoshTerminalScreenBuffer(
-            rows: rows,
-            lineRenditions: MoshTerminalScreen.resizedLineRenditions(
-                self.lineRenditions,
-                rowCount: rows.count
-            ),
-            cursor: MoshTerminalScreen.clampedCursor(
-                self.cursor,
-                maximumRow: rows.count - 1,
-                maximumColumn: (rows.first?.count ?? 1) - 1
-            ),
-            scrollRegion: self.scrollRegion.clamped(rowCount: rows.count),
-            wrapPending: false
-        )
     }
 }
 
