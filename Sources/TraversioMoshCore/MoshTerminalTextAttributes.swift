@@ -32,7 +32,9 @@ public struct MoshTerminalTextAttributes: Equatable, Sendable {
     public var intensity: MoshTerminalIntensity
     public var isItalic: Bool
     public var isUnderlined: Bool
+    public var isBlinking: Bool
     public var isInverse: Bool
+    public var isInvisible: Bool
     public var foregroundColor: MoshTerminalColor?
     public var backgroundColor: MoshTerminalColor?
 
@@ -40,14 +42,18 @@ public struct MoshTerminalTextAttributes: Equatable, Sendable {
         intensity: MoshTerminalIntensity = .normal,
         isItalic: Bool = false,
         isUnderlined: Bool = false,
+        isBlinking: Bool = false,
         isInverse: Bool = false,
+        isInvisible: Bool = false,
         foregroundColor: MoshTerminalColor? = nil,
         backgroundColor: MoshTerminalColor? = nil
     ) {
         self.intensity = intensity
         self.isItalic = isItalic
         self.isUnderlined = isUnderlined
+        self.isBlinking = isBlinking
         self.isInverse = isInverse
+        self.isInvisible = isInvisible
         self.foregroundColor = foregroundColor
         self.backgroundColor = backgroundColor
     }

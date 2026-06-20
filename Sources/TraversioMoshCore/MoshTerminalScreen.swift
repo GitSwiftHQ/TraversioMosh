@@ -1673,10 +1673,18 @@ public struct MoshTerminalScreen: Sendable {
                 self.currentAttributes.isUnderlined = true
             case 24:
                 self.currentAttributes.isUnderlined = false
+            case 5:
+                self.currentAttributes.isBlinking = true
+            case 25:
+                self.currentAttributes.isBlinking = false
             case 7:
                 self.currentAttributes.isInverse = true
             case 27:
                 self.currentAttributes.isInverse = false
+            case 8:
+                self.currentAttributes.isInvisible = true
+            case 28:
+                self.currentAttributes.isInvisible = false
             case 30...37:
                 self.currentAttributes.foregroundColor = Self.ansiColor(
                     code: value - 30,

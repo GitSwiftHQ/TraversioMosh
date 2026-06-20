@@ -1174,6 +1174,22 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func sgrBlinkAndInvisibleFollowOfficialRenditionSetAndResetCodes() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[5;8mA\u{1b}[25mB\u{1b}[28mC\u{1b}[0mD".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["ABCD"])
+        #expect(screen.snapshot.rows[0][0].attributes.isBlinking == true)
+        #expect(screen.snapshot.rows[0][0].attributes.isInvisible == true)
+        #expect(screen.snapshot.rows[0][1].attributes.isBlinking == false)
+        #expect(screen.snapshot.rows[0][1].attributes.isInvisible == true)
+        #expect(screen.snapshot.rows[0][2].attributes.isBlinking == false)
+        #expect(screen.snapshot.rows[0][2].attributes.isInvisible == false)
+        #expect(screen.snapshot.rows[0][3].attributes == .default)
+    }
+
+    @Test
     func emptySGRSequenceResetsAttributes() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
