@@ -308,7 +308,7 @@ public struct MoshTerminalScreen: Sendable {
 
     public mutating func resize(_ dimensions: MoshTerminalDimensions) {
         self.dimensions = dimensions
-        self.rows = Self.resizedRows(self.rows, dimensions: dimensions)
+        self.rows = self.resizedRows(self.rows, dimensions: dimensions)
         self.cursor = Self.clampedCursor(
             self.cursor,
             maximumRow: self.maximumRow,
@@ -333,6 +333,14 @@ public struct MoshTerminalScreen: Sendable {
 
     private var currentMaximumColumn: Int {
         self.maximumColumn
+    }
+
+    private var erasureAttributes: MoshTerminalTextAttributes {
+        MoshTerminalTextAttributes(backgroundColor: self.currentAttributes.backgroundColor)
+    }
+
+    private var erasureCell: MoshTerminalCell {
+        MoshTerminalCell(contents: " ", attributes: self.erasureAttributes)
     }
 
     private mutating func apply(_ control: MoshTerminalControl) {
@@ -526,7 +534,7 @@ public struct MoshTerminalScreen: Sendable {
         let leadingColumn = self.leadingColumn(row: row, column: column)
         let displayWidth = max(self.rows[row][leadingColumn].displayWidth, 1)
         for clearedColumn in leadingColumn..<min(leadingColumn + displayWidth, self.rows[row].count) {
-            self.rows[row][clearedColumn] = .blank
+            self.rows[row][clearedColumn] = self.erasureCell
         }
     }
 
@@ -584,7 +592,7 @@ public struct MoshTerminalScreen: Sendable {
 
         let activeRows = Array(self.rows[region.range])
         let replacement = Array(activeRows.dropFirst(amount))
-            + Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
+            + self.blankRows(rowCount: amount)
         self.replaceRows(in: region.range, with: replacement)
     }
 
@@ -595,7 +603,7 @@ public struct MoshTerminalScreen: Sendable {
         }
 
         let activeRows = Array(self.rows[region.range])
-        let replacement = Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
+        let replacement = self.blankRows(rowCount: amount)
             + Array(activeRows.dropLast(amount))
         self.replaceRows(in: region.range, with: replacement)
     }
@@ -617,7 +625,7 @@ public struct MoshTerminalScreen: Sendable {
 
         let range = self.cursor.row...self.scrollRegion.bottom
         let activeRows = Array(self.rows[range])
-        let replacement = Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
+        let replacement = self.blankRows(rowCount: amount)
             + Array(activeRows.dropLast(amount))
         self.replaceRows(in: range, with: replacement)
     }
@@ -640,7 +648,7 @@ public struct MoshTerminalScreen: Sendable {
         let range = self.cursor.row...self.scrollRegion.bottom
         let activeRows = Array(self.rows[range])
         let replacement = Array(activeRows.dropFirst(amount))
-            + Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
+            + self.blankRows(rowCount: amount)
         self.replaceRows(in: range, with: replacement)
     }
 
@@ -666,9 +674,9 @@ public struct MoshTerminalScreen: Sendable {
             }
         }
         for column in self.cursor.column..<(self.cursor.column + amount) {
-            row[column] = .blank
+            row[column] = self.erasureCell
         }
-        Self.normalizeContinuations(in: &row)
+        Self.normalizeContinuations(in: &row, replacementCell: self.erasureCell)
         self.rows[self.cursor.row] = row
         self.wrapPending = false
     }
@@ -690,9 +698,9 @@ public struct MoshTerminalScreen: Sendable {
             }
         }
         for column in (lineMaximumColumn - amount + 1)...lineMaximumColumn {
-            row[column] = .blank
+            row[column] = self.erasureCell
         }
-        Self.normalizeContinuations(in: &row)
+        Self.normalizeContinuations(in: &row, replacementCell: self.erasureCell)
         self.rows[self.cursor.row] = row
         self.wrapPending = false
     }
@@ -791,7 +799,7 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private mutating func clearScreenForColumnMode() {
-        self.rows = Self.blankRows(dimensions: self.dimensions)
+        self.rows = self.blankRows(dimensions: self.dimensions)
         self.homeCursor()
     }
 
@@ -918,7 +926,7 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private mutating func screenAlignmentTest() {
-        self.rows = Self.alignmentRows(dimensions: self.dimensions)
+        self.rows = self.alignmentRows(dimensions: self.dimensions)
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.currentAttributes = .default
@@ -1398,7 +1406,7 @@ public struct MoshTerminalScreen: Sendable {
                 self.blankCells(row: row, columns: 0...endColumn)
             }
         case 2:
-            self.rows = Self.blankRows(dimensions: self.dimensions)
+            self.rows = self.blankRows(dimensions: self.dimensions)
         default:
             break
         }
@@ -1579,19 +1587,43 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     fileprivate static func blankRows(dimensions: MoshTerminalDimensions) -> [[MoshTerminalCell]] {
-        self.blankRows(rowCount: Int(dimensions.rows), columnCount: Int(dimensions.columns))
+        self.blankRows(rowCount: Int(dimensions.rows), columnCount: Int(dimensions.columns), cell: .blank)
     }
 
     fileprivate static func blankRows(rowCount: Int, columnCount: Int) -> [[MoshTerminalCell]] {
+        self.blankRows(rowCount: rowCount, columnCount: columnCount, cell: .blank)
+    }
+
+    private static func blankRows(
+        rowCount: Int,
+        columnCount: Int,
+        cell: MoshTerminalCell
+    ) -> [[MoshTerminalCell]] {
         return (0..<rowCount).map { _ in
-            self.blankRow(columnCount: columnCount)
+            self.blankRow(columnCount: columnCount, cell: cell)
         }
     }
 
-    private static func alignmentRows(dimensions: MoshTerminalDimensions) -> [[MoshTerminalCell]] {
+    private func blankRows(dimensions: MoshTerminalDimensions) -> [[MoshTerminalCell]] {
+        Self.blankRows(
+            rowCount: Int(dimensions.rows),
+            columnCount: Int(dimensions.columns),
+            cell: self.erasureCell
+        )
+    }
+
+    private func blankRows(rowCount: Int) -> [[MoshTerminalCell]] {
+        Self.blankRows(
+            rowCount: rowCount,
+            columnCount: self.maximumColumn + 1,
+            cell: self.erasureCell
+        )
+    }
+
+    private func alignmentRows(dimensions: MoshTerminalDimensions) -> [[MoshTerminalCell]] {
         let cell = MoshTerminalCell(
             scalar: "E",
-            attributes: .default,
+            attributes: self.erasureAttributes,
             hyperlink: nil,
             displayWidth: 1
         )
@@ -1601,7 +1633,11 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     fileprivate static func blankRow(columnCount: Int) -> [MoshTerminalCell] {
-        Array(repeating: .blank, count: columnCount)
+        self.blankRow(columnCount: columnCount, cell: .blank)
+    }
+
+    private static func blankRow(columnCount: Int, cell: MoshTerminalCell) -> [MoshTerminalCell] {
+        Array(repeating: cell, count: columnCount)
     }
 
     private static func defaultTabStops(columnCount: Int) -> Set<Int> {
@@ -1611,11 +1647,11 @@ public struct MoshTerminalScreen: Sendable {
         return Set(stride(from: 8, to: columnCount, by: 8))
     }
 
-    fileprivate static func resizedRows(
+    fileprivate func resizedRows(
         _ oldRows: [[MoshTerminalCell]],
         dimensions: MoshTerminalDimensions
     ) -> [[MoshTerminalCell]] {
-        var newRows = Self.blankRows(dimensions: dimensions)
+        var newRows = self.blankRows(dimensions: dimensions)
         let copiedRows = min(oldRows.count, newRows.count)
         let copiedColumns = min(oldRows.first?.count ?? 0, newRows.first?.count ?? 0)
 
@@ -1626,7 +1662,7 @@ public struct MoshTerminalScreen: Sendable {
         }
 
         for row in newRows.indices {
-            self.normalizeContinuations(in: &newRows[row])
+            Self.normalizeContinuations(in: &newRows[row], replacementCell: self.erasureCell)
         }
 
         return newRows
@@ -1643,11 +1679,14 @@ public struct MoshTerminalScreen: Sendable {
         )
     }
 
-    private static func normalizeContinuations(in row: inout [MoshTerminalCell]) {
+    private static func normalizeContinuations(
+        in row: inout [MoshTerminalCell],
+        replacementCell: MoshTerminalCell
+    ) {
         for column in row.indices {
             if row[column].isContinuation {
                 if column == 0 || row[column - 1].displayWidth < 2 {
-                    row[column] = .blank
+                    row[column] = replacementCell
                 }
                 continue
             }
@@ -1657,7 +1696,7 @@ public struct MoshTerminalScreen: Sendable {
             }
 
             if column + row[column].displayWidth > row.count {
-                row[column] = .blank
+                row[column] = replacementCell
             } else {
                 for continuationColumn in (column + 1)..<(column + row[column].displayWidth) {
                     row[continuationColumn] = .continuation(

@@ -1220,6 +1220,83 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func eraseCharactersUseCurrentBackgroundForBlankCellsOnly() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[1;31;44mABCD\u{1b}[1;2H\u{1b}[2X".utf8)))
+
+        let eraseAttributes = MoshTerminalTextAttributes(backgroundColor: .ansi(.blue, isBright: false))
+        #expect(screen.snapshot.lineStrings == ["A  D"])
+        #expect(screen.snapshot.rows[0][0].attributes.intensity == .bold)
+        #expect(screen.snapshot.rows[0][0].attributes.foregroundColor == .ansi(.red, isBright: false))
+        #expect(screen.snapshot.rows[0][0].attributes.backgroundColor == .ansi(.blue, isBright: false))
+        #expect(screen.snapshot.rows[0][1].attributes == eraseAttributes)
+        #expect(screen.snapshot.rows[0][2].attributes == eraseAttributes)
+        #expect(screen.snapshot.rows[0][3].attributes.foregroundColor == .ansi(.red, isBright: false))
+    }
+
+    @Test
+    func characterShiftsUseCurrentBackgroundForIntroducedBlanks() throws {
+        var inserted = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+        var deleted = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try inserted.apply(MoshTerminalOutput(bytes: Array("\u{1b}[44mABCD\u{1b}[1;2H\u{1b}[@".utf8)))
+        try deleted.apply(MoshTerminalOutput(bytes: Array("\u{1b}[44mABCD\u{1b}[1;2H\u{1b}[2P".utf8)))
+
+        let eraseAttributes = MoshTerminalTextAttributes(backgroundColor: .ansi(.blue, isBright: false))
+        #expect(inserted.snapshot.lineStrings == ["A BC"])
+        #expect(inserted.snapshot.rows[0][1].attributes == eraseAttributes)
+        #expect(deleted.snapshot.lineStrings == ["AD  "])
+        #expect(deleted.snapshot.rows[0][2].attributes == eraseAttributes)
+        #expect(deleted.snapshot.rows[0][3].attributes == eraseAttributes)
+    }
+
+    @Test
+    func rowOperationsUseCurrentBackgroundForIntroducedRows() throws {
+        var inserted = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 3))
+        var scrolled = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 3))
+
+        try inserted.apply(
+            MoshTerminalOutput(bytes: Array("\u{1b}[44m\u{1b}[1;1HAAA\u{1b}[2;1HBBB\u{1b}[3;1HCCC\u{1b}[2;1H\u{1b}[L".utf8))
+        )
+        try scrolled.apply(
+            MoshTerminalOutput(bytes: Array("\u{1b}[44m\u{1b}[1;1HAAA\u{1b}[2;1HBBB\u{1b}[3;1HCCC\u{1b}[S".utf8))
+        )
+
+        let eraseAttributes = MoshTerminalTextAttributes(backgroundColor: .ansi(.blue, isBright: false))
+        #expect(inserted.snapshot.lineStrings == ["AAA", "   ", "BBB"])
+        #expect(inserted.snapshot.rows[1].allSatisfy { $0.attributes == eraseAttributes })
+        #expect(scrolled.snapshot.lineStrings == ["BBB", "CCC", "   "])
+        #expect(scrolled.snapshot.rows[2].allSatisfy { $0.attributes == eraseAttributes })
+    }
+
+    @Test
+    func resizeIntroducedCellsUseCurrentBackground() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[44mAB".utf8)))
+        screen.resize(try MoshTerminalDimensions(columns: 4, rows: 2))
+
+        let eraseAttributes = MoshTerminalTextAttributes(backgroundColor: .ansi(.blue, isBright: false))
+        #expect(screen.snapshot.lineStrings == ["AB  ", "    "])
+        #expect(screen.snapshot.rows[0][2].attributes == eraseAttributes)
+        #expect(screen.snapshot.rows[0][3].attributes == eraseAttributes)
+        #expect(screen.snapshot.rows[1].allSatisfy { $0.attributes == eraseAttributes })
+    }
+
+    @Test
+    func decScreenAlignmentUsesCurrentBackgroundOnly() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[1;31;44m\u{1b}#8".utf8)))
+
+        let eraseAttributes = MoshTerminalTextAttributes(backgroundColor: .ansi(.blue, isBright: false))
+        #expect(screen.snapshot.lineStrings == ["EE"])
+        #expect(screen.snapshot.rows[0][0].attributes == eraseAttributes)
+        #expect(screen.snapshot.rows[0][1].attributes == eraseAttributes)
+    }
+
+    @Test
     func sgrDisableCodesClearIndividualAttributes() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
