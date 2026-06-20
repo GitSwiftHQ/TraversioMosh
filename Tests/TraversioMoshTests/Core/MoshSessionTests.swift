@@ -282,11 +282,11 @@ struct MoshSessionTests {
     }
 
     @Test
-    func terminalInputUsesOwnedScreenApplicationCursorMode() async throws {
+    func terminalInputWithoutExplicitModePreservesTerminalBytesForServerTranslation() async throws {
         let fixture = try await makeSessionFixture(columns: 80, rows: 24)
         let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
         let hostOperationTask = collectHostOperations(from: fixture.session, count: 1)
-        let applicationCursorMode = MoshHostOperation.write(
+        let hostOutput = MoshHostOperation.write(
             MoshTerminalOutput(bytes: Array("\u{1b}[?1h".utf8))
         )
 
@@ -295,14 +295,14 @@ struct MoshSessionTests {
             try await fixture.session.start()
 
             var hostState = MoshTerminalHostState()
-            hostState.append(applicationCursorMode)
+            hostState.append(hostOutput)
             await fixture.serverRuntime.setCurrentState(hostState)
             _ = try await fixture.serverRuntime.sendDueDatagrams()
 
             let hostOperations = try await withSessionTimeout {
                 try await hostOperationTask.value
             }
-            #expect(hostOperations == [applicationCursorMode])
+            #expect(hostOperations == [hostOutput])
             #expect(await fixture.session.screenSnapshot.isApplicationCursorKeysEnabled == true)
 
             try await fixture.session.sendTerminalInput([0x1b, UInt8(ascii: "O"), UInt8(ascii: "A")])

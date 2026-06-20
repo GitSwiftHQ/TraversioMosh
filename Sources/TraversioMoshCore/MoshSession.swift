@@ -273,10 +273,7 @@ public actor MoshSession {
     }
 
     public func sendTerminalInput(_ bytes: [UInt8]) async throws {
-        try await self.sendTerminalInput(
-            bytes,
-            applicationCursorKeysEnabled: self.terminalScreen.snapshot.isApplicationCursorKeysEnabled
-        )
+        try await self.sendKeystrokes(bytes)
     }
 
     public func resize(columns: Int32, rows: Int32) async throws {
