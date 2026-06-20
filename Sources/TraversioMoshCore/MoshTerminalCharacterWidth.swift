@@ -11,6 +11,9 @@ enum MoshTerminalScalarWidth: Int, Equatable, Sendable {
 
 enum MoshTerminalCharacterWidth {
     static func width(of scalar: Unicode.Scalar) -> MoshTerminalScalarWidth {
+        if Self.isPrintableISO88591(scalar) {
+            return .narrow
+        }
         if Self.isZeroWidth(scalar) {
             return .zero
         }
@@ -18,6 +21,10 @@ enum MoshTerminalCharacterWidth {
             return .wide
         }
         return .narrow
+    }
+
+    private static func isPrintableISO88591(_ scalar: Unicode.Scalar) -> Bool {
+        (0x20...0x7e).contains(scalar.value) || (0xa0...0xff).contains(scalar.value)
     }
 
     private static func isZeroWidth(_ scalar: Unicode.Scalar) -> Bool {

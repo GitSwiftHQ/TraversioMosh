@@ -44,6 +44,7 @@ public struct MoshSessionConfiguration: Sendable {
     public var timing: MoshSSPSendTimingConfiguration
     public var maximumSerializedFragmentByteCount: Int
     public var chaffSource: MoshSSPChaffSource
+    public var predictionConfiguration: MoshPredictionConfiguration
 
     public init(
         endpoint: MoshEndpoint,
@@ -53,7 +54,8 @@ public struct MoshSessionConfiguration: Sendable {
         timer: any MoshSessionTimer = MoshTaskSessionTimer(),
         timing: MoshSSPSendTimingConfiguration = MoshSSPSendTimingConfiguration(),
         maximumSerializedFragmentByteCount: Int = 1_280,
-        chaffSource: MoshSSPChaffSource = .random
+        chaffSource: MoshSSPChaffSource = .random,
+        predictionConfiguration: MoshPredictionConfiguration = MoshPredictionConfiguration()
     ) {
         self.endpoint = endpoint
         self.initialTerminalDimensions = initialTerminalDimensions
@@ -63,6 +65,7 @@ public struct MoshSessionConfiguration: Sendable {
         self.timing = timing
         self.maximumSerializedFragmentByteCount = maximumSerializedFragmentByteCount
         self.chaffSource = chaffSource
+        self.predictionConfiguration = predictionConfiguration
     }
 }
 
@@ -131,6 +134,7 @@ public actor MoshSession {
     private var terminalEngine: MoshTerminalStateEngine
     private var terminalScreen: MoshTerminalScreen
     private var userInputTranslator: MoshTerminalUserInputTranslator
+    private var predictionEngine: MoshTerminalPredictionEngine
     private var runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>?
     private var receiveTask: Task<Void, Never>?
     private var maintenanceTask: Task<Void, Never>?
@@ -166,6 +170,9 @@ public actor MoshSession {
             dimensions: configuration.initialTerminalDimensions
         )
         self.userInputTranslator = MoshTerminalUserInputTranslator()
+        self.predictionEngine = MoshTerminalPredictionEngine(
+            configuration: configuration.predictionConfiguration
+        )
     }
 
     deinit {
@@ -181,7 +188,16 @@ public actor MoshSession {
     }
 
     public var screenSnapshot: MoshTerminalScreenSnapshot {
-        self.terminalScreen.snapshot
+        get async {
+            let baseSnapshot = self.terminalScreen.snapshot
+            self.predictionEngine.cull(
+                baseSnapshot: baseSnapshot,
+                nowMilliseconds: await self.configuration.clock.nowMilliseconds()
+            )
+            return self.predictionEngine.projectedSnapshot(
+                baseSnapshot: baseSnapshot
+            )
+        }
     }
 
     public func start() async throws {
@@ -278,6 +294,8 @@ public actor MoshSession {
             return
         }
 
+        try self.requireStarted()
+        await self.registerUserPrediction(bytes)
         try await self.updateClientState(.keystrokes(bytes))
     }
 
@@ -294,6 +312,7 @@ public actor MoshSession {
             bytes,
             applicationCursorKeysEnabled: applicationCursorKeysEnabled
         )
+        await self.registerUserPrediction(bytes)
         guard translatedBytes.isEmpty == false else {
             return
         }
@@ -352,11 +371,14 @@ public actor MoshSession {
     ) async throws {
         let state = instruction.instructionResult.latestState
         let operations = self.terminalEngine.acceptHostState(state.state)
+        var generatedTerminalToHostBytes: [UInt8] = []
         for (operationIndex, operation) in operations.enumerated() {
             let renderOperation = MoshTerminalRenderOperation(operation)
             if let renderOperation {
                 do {
-                    try self.terminalScreen.apply(renderOperation)
+                    generatedTerminalToHostBytes.append(
+                        contentsOf: try self.terminalScreen.apply(renderOperation)
+                    )
                 } catch {
                     let failure = MoshSessionScreenProjectionFailure(
                         stateNumber: state.number,
@@ -373,6 +395,14 @@ public actor MoshSession {
                 self.renderOperationContinuation.yield(renderOperation)
             }
         }
+        if generatedTerminalToHostBytes.isEmpty == false {
+            try await self.updateClientState(.keystrokes(generatedTerminalToHostBytes))
+        }
+        await self.updatePredictionHints(runtime: self.runtime, hostState: state.state)
+        self.predictionEngine.cull(
+            baseSnapshot: self.terminalScreen.snapshot,
+            nowMilliseconds: await self.configuration.clock.nowMilliseconds()
+        )
         self.diagnosticEventContinuation.yield(
             .hostStateReceived(number: state.number, operationCount: operations.count)
         )
@@ -414,6 +444,39 @@ public actor MoshSession {
         }
         guard self.isStarted else {
             throw MoshSessionError.notStarted
+        }
+    }
+
+    private func registerUserPrediction(_ bytes: [UInt8]) async {
+        guard bytes.isEmpty == false,
+              let runtime = self.runtime else {
+            return
+        }
+
+        await self.updatePredictionHints(runtime: runtime, hostState: self.terminalEngine.hostState)
+        self.predictionEngine.setLocalFrameSent(await runtime.lastSentSendStateNumber())
+        self.predictionEngine.registerUserInput(
+            bytes,
+            baseSnapshot: self.terminalScreen.snapshot,
+            nowMilliseconds: await self.configuration.clock.nowMilliseconds()
+        )
+    }
+
+    private func updatePredictionHints(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>?,
+        hostState: MoshTerminalHostState
+    ) async {
+        if let runtime {
+            self.predictionEngine.setLocalFrameAcknowledged(
+                await runtime.knownAcknowledgedSendStateNumber()
+            )
+            self.predictionEngine.setSendIntervalMilliseconds(
+                await runtime.sendIntervalMilliseconds()
+            )
+        }
+
+        if let latestEchoAcknowledgementNumber = hostState.latestEchoAcknowledgementNumber {
+            self.predictionEngine.setLocalFrameLateAcknowledged(latestEchoAcknowledgementNumber)
         }
     }
 

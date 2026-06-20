@@ -108,6 +108,14 @@ public struct MoshSSPInMemoryLoop<
         self.scheduler.sender.knownAcknowledgedStateNumber
     }
 
+    public var lastSentSendStateNumber: UInt64 {
+        self.scheduler.sender.lastSentStateNumber
+    }
+
+    public var sendIntervalMilliseconds: UInt64 {
+        self.scheduler.sendIntervalMilliseconds
+    }
+
     public var shutdownAcknowledged: Bool {
         self.scheduler.shutdownAcknowledged
     }

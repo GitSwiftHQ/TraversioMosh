@@ -40,24 +40,40 @@ public enum MoshTerminalMouseEncodingMode: Int, Equatable, Sendable {
 }
 
 public struct MoshTerminalCell: Equatable, Sendable {
-    public static let blank = MoshTerminalCell(contents: " ")
+    private static let maximumGraphemeByteCount = 32
+
+    public static let blank = MoshTerminalCell(
+        contents: " ",
+        attributes: .default,
+        hyperlink: nil,
+        displayWidth: 1,
+        isContinuation: false,
+        isImplicitBlank: true,
+        isFallback: false
+    )
 
     public let contents: String
     public let attributes: MoshTerminalTextAttributes
     public let hyperlink: MoshTerminalHyperlink?
     public let displayWidth: Int
     public let isContinuation: Bool
+    fileprivate let isImplicitBlank: Bool
+    private let isFallback: Bool
 
     public init(
         contents: String,
         attributes: MoshTerminalTextAttributes = .default,
         hyperlink: MoshTerminalHyperlink? = nil
     ) {
-        self.contents = contents
-        self.attributes = attributes
-        self.hyperlink = hyperlink
-        self.displayWidth = 1
-        self.isContinuation = false
+        self.init(
+            contents: contents,
+            attributes: attributes,
+            hyperlink: hyperlink,
+            displayWidth: 1,
+            isContinuation: false,
+            isImplicitBlank: false,
+            isFallback: false
+        )
     }
 
     init(
@@ -71,6 +87,8 @@ public struct MoshTerminalCell: Equatable, Sendable {
         self.hyperlink = hyperlink
         self.displayWidth = displayWidth
         self.isContinuation = false
+        self.isImplicitBlank = false
+        self.isFallback = false
     }
 
     private init(
@@ -78,13 +96,40 @@ public struct MoshTerminalCell: Equatable, Sendable {
         attributes: MoshTerminalTextAttributes,
         hyperlink: MoshTerminalHyperlink?,
         displayWidth: Int,
-        isContinuation: Bool
+        isContinuation: Bool,
+        isImplicitBlank: Bool,
+        isFallback: Bool
     ) {
         self.contents = contents
         self.attributes = attributes
         self.hyperlink = hyperlink
         self.displayWidth = displayWidth
         self.isContinuation = isContinuation
+        self.isImplicitBlank = isImplicitBlank
+        self.isFallback = isFallback
+    }
+
+    public static func == (lhs: MoshTerminalCell, rhs: MoshTerminalCell) -> Bool {
+        lhs.contents == rhs.contents
+            && lhs.attributes == rhs.attributes
+            && lhs.hyperlink == rhs.hyperlink
+            && lhs.displayWidth == rhs.displayWidth
+            && lhs.isContinuation == rhs.isContinuation
+    }
+
+    static func blank(
+        attributes: MoshTerminalTextAttributes,
+        hyperlink: MoshTerminalHyperlink? = nil
+    ) -> MoshTerminalCell {
+        MoshTerminalCell(
+            contents: " ",
+            attributes: attributes,
+            hyperlink: hyperlink,
+            displayWidth: 1,
+            isContinuation: false,
+            isImplicitBlank: true,
+            isFallback: false
+        )
     }
 
     static func continuation(
@@ -96,18 +141,51 @@ public struct MoshTerminalCell: Equatable, Sendable {
             attributes: attributes,
             hyperlink: hyperlink,
             displayWidth: 0,
-            isContinuation: true
+            isContinuation: true,
+            isImplicitBlank: false,
+            isFallback: false
         )
     }
 
     func appending(_ scalar: Unicode.Scalar) -> MoshTerminalCell {
-        MoshTerminalCell(
+        guard self.isFull == false else {
+            return self
+        }
+
+        return MoshTerminalCell(
             contents: self.contents + String(scalar),
             attributes: self.attributes,
             hyperlink: self.hyperlink,
             displayWidth: self.displayWidth,
-            isContinuation: self.isContinuation
+            isContinuation: self.isContinuation,
+            isImplicitBlank: false,
+            isFallback: self.isFallback
         )
+    }
+
+    func appendingWithFallback(_ scalar: Unicode.Scalar) -> MoshTerminalCell {
+        MoshTerminalCell(
+            contents: "\u{00a0}" + String(scalar),
+            attributes: self.attributes,
+            hyperlink: self.hyperlink,
+            displayWidth: 1,
+            isContinuation: false,
+            isImplicitBlank: false,
+            isFallback: true
+        )
+    }
+
+    private var isFull: Bool {
+        self.officialStoredByteCount >= Self.maximumGraphemeByteCount
+    }
+
+    private var officialStoredByteCount: Int {
+        guard self.isFallback,
+              self.contents.unicodeScalars.first?.value == 0x00a0 else {
+            return self.contents.utf8.count
+        }
+
+        return self.contents.utf8.count - String("\u{00a0}").utf8.count
     }
 }
 
@@ -176,20 +254,29 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
 }
 
 public struct MoshTerminalScreen: Sendable {
+    private static let maximumCSIParameterScalars = 100
+    private static let maximumCSIIntermediateScalars = 8
+    private static let maximumEscapeIntermediateScalars = 8
+    private static let maximumCSIParameterValue = 65_535
     private static let maximumStringControlPayloadScalars = 16 * 1024
     private static let maximumOSCTitleScalars = 256
+    private static let primaryDeviceAttributesReply = Array("\u{1b}[?62c".utf8)
+    private static let secondaryDeviceAttributesReply = Array("\u{1b}[>1;10;0c".utf8)
+    private static let deviceStatusOKReply = Array("\u{1b}[0n".utf8)
 
     public private(set) var dimensions: MoshTerminalDimensions
     public private(set) var cursor: MoshTerminalCursor
 
     private var parser: MoshTerminalInputParser
     private var rows: [[MoshTerminalCell]]
+    private var activeGraphemeCursor: MoshTerminalCursor?
     private var scrollRegion: MoshTerminalScrollRegion
     private var currentAttributes: MoshTerminalTextAttributes
     private var normalSavedCursorState: MoshTerminalSavedCursorState?
     private var escapeState: EscapeState?
     private var wrapPending: Bool
     private var tabStops: Set<Int>
+    private var defaultTabStopsEnabled: Bool
     private var originMode: Bool
     private var autoWrapMode: Bool
     private var insertMode: Bool
@@ -207,21 +294,21 @@ public struct MoshTerminalScreen: Sendable {
     private var windowTitle: String
     private var clipboard: String
     private var currentHyperlink: MoshTerminalHyperlink?
-    private var g0CharacterSet: MoshTerminalCharacterSet
-    private var g1CharacterSet: MoshTerminalCharacterSet
-    private var activeCharacterSetSlot: MoshTerminalCharacterSetSlot
+    private var terminalToHostBytes: [UInt8]
 
     public init(dimensions: MoshTerminalDimensions) {
         self.dimensions = dimensions
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
         self.parser = MoshTerminalInputParser()
         self.rows = Self.blankRows(dimensions: dimensions)
+        self.activeGraphemeCursor = self.cursor
         self.scrollRegion = .full(rowCount: Int(dimensions.rows))
         self.currentAttributes = .default
         self.normalSavedCursorState = nil
         self.escapeState = nil
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(dimensions.columns))
+        self.defaultTabStopsEnabled = true
         self.originMode = false
         self.autoWrapMode = true
         self.insertMode = false
@@ -239,9 +326,7 @@ public struct MoshTerminalScreen: Sendable {
         self.windowTitle = ""
         self.clipboard = ""
         self.currentHyperlink = nil
-        self.g0CharacterSet = .usASCII
-        self.g1CharacterSet = .usASCII
-        self.activeCharacterSetSlot = .g0
+        self.terminalToHostBytes = []
     }
 
     public var snapshot: MoshTerminalScreenSnapshot {
@@ -266,29 +351,42 @@ public struct MoshTerminalScreen: Sendable {
         )
     }
 
-    public mutating func apply(_ operation: MoshTerminalRenderOperation) throws {
+    @discardableResult
+    public mutating func apply(_ operation: MoshTerminalRenderOperation) throws -> [UInt8] {
         switch operation {
         case .write(let output):
-            try self.apply(output)
+            return try self.apply(output)
         case .resize(let dimensions):
             self.resize(dimensions)
+            return self.drainTerminalToHostBytes()
         }
     }
 
-    public mutating func apply(_ operations: [MoshTerminalRenderOperation]) throws {
+    @discardableResult
+    public mutating func apply(_ operations: [MoshTerminalRenderOperation]) throws -> [UInt8] {
+        var terminalToHostBytes: [UInt8] = []
         for operation in operations {
-            try self.apply(operation)
+            terminalToHostBytes.append(contentsOf: try self.apply(operation))
         }
+        return terminalToHostBytes
     }
 
-    public mutating func apply(_ output: MoshTerminalOutput) throws {
+    @discardableResult
+    public mutating func apply(_ output: MoshTerminalOutput) throws -> [UInt8] {
         let tokens = try self.parser.parse(output.bytes)
         for token in tokens {
-            self.apply(token)
+            self.applyToken(token)
         }
+        return self.drainTerminalToHostBytes()
     }
 
-    public mutating func apply(_ token: MoshTerminalInputToken) {
+    @discardableResult
+    public mutating func apply(_ token: MoshTerminalInputToken) -> [UInt8] {
+        self.applyToken(token)
+        return self.drainTerminalToHostBytes()
+    }
+
+    private mutating func applyToken(_ token: MoshTerminalInputToken) {
         if self.escapeState != nil {
             self.consumeEscapeToken(token)
             return
@@ -302,11 +400,23 @@ public struct MoshTerminalScreen: Sendable {
         }
     }
 
+    private mutating func appendTerminalToHostBytes(_ bytes: [UInt8]) {
+        self.terminalToHostBytes.append(contentsOf: bytes)
+    }
+
+    private mutating func drainTerminalToHostBytes() -> [UInt8] {
+        defer {
+            self.terminalToHostBytes.removeAll(keepingCapacity: true)
+        }
+        return self.terminalToHostBytes
+    }
+
     public mutating func finishPendingInput() throws {
         try self.parser.finish()
     }
 
     public mutating func resize(_ dimensions: MoshTerminalDimensions) {
+        let oldColumnCount = self.maximumColumn + 1
         self.dimensions = dimensions
         self.rows = self.resizedRows(self.rows, dimensions: dimensions)
         self.cursor = Self.clampedCursor(
@@ -314,9 +424,21 @@ public struct MoshTerminalScreen: Sendable {
             maximumRow: self.maximumRow,
             maximumColumn: self.maximumColumn
         )
+        if let activeGraphemeCursor,
+           self.rows.indices.contains(activeGraphemeCursor.row),
+           self.rows[activeGraphemeCursor.row].indices.contains(activeGraphemeCursor.column) {
+            self.activeGraphemeCursor = activeGraphemeCursor
+        } else {
+            self.activeGraphemeCursor = nil
+        }
         self.scrollRegion = .full(rowCount: self.rows.count)
-        self.wrapPending = false
+        // Official Mosh preserves next_print_will_wrap across framebuffer resize.
         self.tabStops = self.tabStops.filter { $0 <= self.maximumColumn }
+        if self.defaultTabStopsEnabled, oldColumnCount <= self.maximumColumn {
+            for column in oldColumnCount...self.maximumColumn where column % 8 == 0 {
+                self.tabStops.insert(column)
+            }
+        }
         self.normalSavedCursorState = self.normalSavedCursorState?.clamped(
             maximumRow: self.maximumRow,
             maximumColumn: self.maximumColumn
@@ -340,14 +462,15 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private var erasureCell: MoshTerminalCell {
-        MoshTerminalCell(contents: " ", attributes: self.erasureAttributes)
+        MoshTerminalCell.blank(attributes: self.erasureAttributes)
     }
 
     private mutating func apply(_ control: MoshTerminalControl) {
         switch control {
         case .null:
-            break
+            self.wrapPending = false
         case .bell:
+            self.wrapPending = false
             self.bellCount += 1
         case .backspace:
             self.wrapPending = false
@@ -356,6 +479,7 @@ public struct MoshTerminalScreen: Sendable {
                 row: self.cursor.row,
                 column: column
             )
+            self.markActiveGraphemeAtCursor()
         case .horizontalTab:
             self.moveForwardTabStops(count: 1, preservingPendingWrap: true)
         case .lineFeed:
@@ -364,6 +488,7 @@ public struct MoshTerminalScreen: Sendable {
         case .carriageReturn:
             self.wrapPending = false
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
+            self.markActiveGraphemeAtCursor()
         case .escape:
             self.escapeState = .escape
         case .delete:
@@ -373,11 +498,12 @@ public struct MoshTerminalScreen: Sendable {
             case 0x0b, 0x0c:
                 self.wrapPending = false
                 self.index()
-            case 0x0e:
-                self.activeCharacterSetSlot = .g1
-            case 0x0f:
-                self.activeCharacterSetSlot = .g0
+            case 0x18, 0x1a:
+                self.wrapPending = false
             default:
+                if Self.isC0PrimeControl(byte) {
+                    self.wrapPending = false
+                }
                 break
             }
         case .c1(let byte):
@@ -388,12 +514,15 @@ public struct MoshTerminalScreen: Sendable {
             case 0x85:
                 self.wrapPending = false
                 self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
+                self.markActiveGraphemeAtCursor()
                 self.index()
             case 0x8d:
                 self.wrapPending = false
                 self.reverseIndex()
             case 0x90:
                 self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
+            case 0x98:
+                self.escapeState = .stringControl(StringControlState(kind: .startOfString))
             case 0x88:
                 self.wrapPending = false
                 self.setTabStop()
@@ -406,20 +535,22 @@ public struct MoshTerminalScreen: Sendable {
             case 0x9f:
                 self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
             default:
+                if Self.isExecuteAndGroundC1(byte) {
+                    self.wrapPending = false
+                }
                 break
             }
         }
     }
 
     private mutating func place(_ rawScalar: Unicode.Scalar) {
-        let scalar = self.activeCharacterSet.map(rawScalar)
-        let scalarWidth = MoshTerminalCharacterWidth.width(of: scalar)
+        let scalarWidth = MoshTerminalCharacterWidth.width(of: rawScalar)
         if scalarWidth == .zero {
-            self.appendZeroWidthScalar(scalar)
+            self.appendZeroWidthScalar(rawScalar)
             return
         }
 
-        if self.appendGraphemeClusterContinuation(scalar, width: scalarWidth) {
+        if self.appendGraphemeClusterContinuation(rawScalar, width: scalarWidth) {
             return
         }
 
@@ -446,7 +577,7 @@ public struct MoshTerminalScreen: Sendable {
 
         self.clearCellForWrite(row: self.cursor.row, column: self.cursor.column)
         self.rows[self.cursor.row][self.cursor.column] = MoshTerminalCell(
-            scalar: scalar,
+            scalar: rawScalar,
             attributes: self.currentAttributes,
             hyperlink: self.currentHyperlink,
             displayWidth: displayWidth
@@ -459,6 +590,7 @@ public struct MoshTerminalScreen: Sendable {
             )
         }
 
+        self.activeGraphemeCursor = self.cursor
         let lastColumn = self.cursor.column + displayWidth - 1
         if lastColumn == self.currentMaximumColumn {
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: self.currentMaximumColumn)
@@ -476,18 +608,36 @@ public struct MoshTerminalScreen: Sendable {
         self.currentMaximumColumn - self.cursor.column + 1
     }
 
-    private mutating func appendZeroWidthScalar(_ scalar: Unicode.Scalar) {
-        let targetColumn: Int
-        if self.wrapPending {
-            targetColumn = self.cursor.column
-        } else if self.cursor.column > 0 {
-            targetColumn = self.cursor.column - 1
+    private mutating func markActiveGraphemeAtCursor() {
+        self.activeGraphemeCursor = self.cursor
+    }
+
+    private mutating func advanceCursorAfterImplicitPrint(width: Int) {
+        self.activeGraphemeCursor = self.cursor
+        let targetColumn = self.cursor.column + width
+        if targetColumn >= self.currentMaximumColumn + 1 {
+            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: self.currentMaximumColumn)
+            self.wrapPending = true
         } else {
-            targetColumn = self.cursor.column
+            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: targetColumn)
+            self.wrapPending = false
+        }
+    }
+
+    private mutating func appendZeroWidthScalar(_ scalar: Unicode.Scalar) {
+        guard let target = self.activeGraphemeCursor,
+              self.rows.indices.contains(target.row),
+              self.rows[target.row].indices.contains(target.column) else {
+            return
         }
 
-        let column = self.leadingColumn(row: self.cursor.row, column: targetColumn)
-        self.rows[self.cursor.row][column] = self.rows[self.cursor.row][column].appending(scalar)
+        let column = self.leadingColumn(row: target.row, column: target.column)
+        if self.rows[target.row][column].isImplicitBlank {
+            self.rows[target.row][column] = self.rows[target.row][column].appendingWithFallback(scalar)
+            self.advanceCursorAfterImplicitPrint(width: 1)
+        } else {
+            self.rows[target.row][column] = self.rows[target.row][column].appending(scalar)
+        }
     }
 
     private mutating func appendGraphemeClusterContinuation(
@@ -495,34 +645,26 @@ public struct MoshTerminalScreen: Sendable {
         width: MoshTerminalScalarWidth
     ) -> Bool {
         guard width == .wide,
-              let column = self.activeGraphemeClusterColumn(),
-              self.rows[self.cursor.row][column].contents.unicodeScalars.last?.value == 0x200d else {
+              let position = self.activeGraphemeCellPosition(),
+              self.rows[position.row][position.column].contents.unicodeScalars.last?.value == 0x200d else {
             return false
         }
 
-        self.rows[self.cursor.row][column] = self.rows[self.cursor.row][column].appending(scalar)
+        self.rows[position.row][position.column] = self.rows[position.row][position.column].appending(scalar)
         return true
     }
 
-    private func activeGraphemeClusterColumn() -> Int? {
-        guard self.rows.indices.contains(self.cursor.row) else {
+    private func activeGraphemeCellPosition() -> MoshTerminalCursor? {
+        guard let target = self.activeGraphemeCursor,
+              self.rows.indices.contains(target.row),
+              self.rows[target.row].indices.contains(target.column) else {
             return nil
         }
 
-        let targetColumn: Int
-        if self.wrapPending {
-            targetColumn = self.cursor.column
-        } else if self.cursor.column > 0 {
-            targetColumn = self.cursor.column - 1
-        } else {
-            targetColumn = self.cursor.column
-        }
-
-        guard self.rows[self.cursor.row].indices.contains(targetColumn) else {
-            return nil
-        }
-
-        return self.leadingColumn(row: self.cursor.row, column: targetColumn)
+        return MoshTerminalCursor(
+            row: target.row,
+            column: self.leadingColumn(row: target.row, column: target.column)
+        )
     }
 
     private mutating func clearCellForWrite(row: Int, column: Int) {
@@ -560,6 +702,7 @@ public struct MoshTerminalScreen: Sendable {
                 column: self.cursor.column
             )
         }
+        self.markActiveGraphemeAtCursor()
     }
 
     private mutating func reverseIndex() {
@@ -571,6 +714,7 @@ public struct MoshTerminalScreen: Sendable {
                 column: self.cursor.column
             )
         }
+        self.markActiveGraphemeAtCursor()
         self.wrapPending = false
     }
 
@@ -611,6 +755,7 @@ public struct MoshTerminalScreen: Sendable {
     private mutating func insertLines(count: Int) {
         defer {
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
+            self.markActiveGraphemeAtCursor()
             self.wrapPending = false
         }
 
@@ -633,6 +778,7 @@ public struct MoshTerminalScreen: Sendable {
     private mutating func deleteLines(count: Int) {
         defer {
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
+            self.markActiveGraphemeAtCursor()
             self.wrapPending = false
         }
 
@@ -725,6 +871,7 @@ public struct MoshTerminalScreen: Sendable {
         )
 
         guard top < bottom else {
+            self.wrapPending = false
             return
         }
 
@@ -750,6 +897,7 @@ public struct MoshTerminalScreen: Sendable {
             maximumRow: self.maximumRow,
             maximumColumn: self.maximumColumn
         )
+        self.markActiveGraphemeAtCursor()
         self.currentAttributes = savedCursorState.attributes
         self.autoWrapMode = savedCursorState.autoWrapMode
         self.originMode = savedCursorState.originMode
@@ -773,8 +921,8 @@ public struct MoshTerminalScreen: Sendable {
         case 5:
             self.reverseVideo = enabled
         case 6:
-            self.originMode = enabled
             self.homeCursor()
+            self.originMode = enabled
         case 7:
             self.autoWrapMode = enabled
         case 9, 1000...1003:
@@ -817,127 +965,185 @@ public struct MoshTerminalScreen: Sendable {
             return
         }
 
-        switch (state, token) {
-        case (.escape, .scalar("[")):
-            self.escapeState = .csi(CSIState())
-        case (.escape, .scalar("(")):
-            self.escapeState = .characterSetDesignation(.g0)
-        case (.escape, .scalar(")")):
-            self.escapeState = .characterSetDesignation(.g1)
-        case (.escape, .scalar("#")):
-            self.escapeState = .escapeHash
-        case (.escape, .scalar("P")):
-            self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
-        case (.escape, .scalar("X")):
-            self.escapeState = .stringControl(StringControlState(kind: .startOfString))
-        case (.escape, .scalar("]")):
-            self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
-        case (.escape, .scalar("^")):
-            self.escapeState = .stringControl(StringControlState(kind: .privacyMessage))
-        case (.escape, .scalar("_")):
-            self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
-        case (.escape, .scalar("7")):
-            self.wrapPending = false
-            self.saveCursorState()
-            self.escapeState = nil
-        case (.escape, .scalar("8")):
-            self.wrapPending = false
-            self.restoreCursorState()
-            self.escapeState = nil
-        case (.escape, .scalar("H")):
-            self.setTabStop()
-            self.escapeState = nil
-        case (.escape, .scalar("D")):
-            self.index()
-            self.escapeState = nil
-        case (.escape, .scalar("E")):
-            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
-            self.index()
-            self.escapeState = nil
-        case (.escape, .scalar("M")):
-            self.reverseIndex()
-            self.escapeState = nil
-        case (.escape, .scalar("c")):
-            self.reset()
-        case (.escape, .control(.c1(0x9b))):
-            self.escapeState = .csi(CSIState())
-        case (.escape, .control(.c1(0x90))):
-            self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
-        case (.escape, .control(.c1(0x98))):
-            self.escapeState = .stringControl(StringControlState(kind: .startOfString))
-        case (.escape, .control(.c1(0x9d))):
-            self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
-        case (.escape, .control(.c1(0x9e))):
-            self.escapeState = .stringControl(StringControlState(kind: .privacyMessage))
-        case (.escape, .control(.c1(0x9f))):
-            self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
-        case (.escape, _):
-            self.wrapPending = false
-            self.escapeState = nil
-        case (.csi(let csiState), .scalar(let scalar)):
-            self.consumeCSI(scalar: scalar, state: csiState)
-        case (.csi, .control(.escape)):
-            self.escapeState = .escape
-        case (.csi, _):
-            break
-        case (.characterSetDesignation(let slot), .scalar(let scalar)):
-            self.designateCharacterSet(slot: slot, final: scalar)
-            self.escapeState = nil
-        case (.characterSetDesignation, .control(.escape)):
-            self.escapeState = .escape
-        case (.characterSetDesignation, _):
-            self.escapeState = nil
-        case (.escapeHash, .scalar("8")):
-            self.screenAlignmentTest()
-            self.escapeState = nil
-        case (.escapeHash, .control(.escape)):
-            self.escapeState = .escape
-        case (.escapeHash, _):
-            self.wrapPending = false
-            self.escapeState = nil
-        case (.stringControl(let stringState), _):
+        switch state {
+        case .escape:
+            self.consumeEscapeEntryToken(token)
+        case .escapeIntermediate(let intermediates):
+            self.consumeEscapeIntermediateToken(token, intermediates: intermediates)
+        case .csi(let csiState):
+            switch token {
+            case .scalar(let scalar):
+                self.consumeCSI(scalar: scalar, state: csiState)
+            case .control(let control):
+                self.consumeCSIControl(control)
+            }
+        case .stringControl(let stringState):
             self.consumeStringControl(token: token, state: stringState)
         }
     }
 
-    private var activeCharacterSet: MoshTerminalCharacterSet {
-        switch self.activeCharacterSetSlot {
-        case .g0:
-            return self.g0CharacterSet
-        case .g1:
-            return self.g1CharacterSet
+    private mutating func consumeEscapeEntryToken(_ token: MoshTerminalInputToken) {
+        switch token {
+        case .scalar(let scalar):
+            self.consumeEscapeEntryScalar(scalar)
+        case .control(let control):
+            self.consumeEscapeControl(control, continuing: .escape)
         }
     }
 
-    private mutating func designateCharacterSet(
-        slot: MoshTerminalCharacterSetSlot,
-        final scalar: Unicode.Scalar
-    ) {
-        guard let characterSet = MoshTerminalCharacterSet(designationFinal: scalar) else {
+    private mutating func consumeEscapeEntryScalar(_ scalar: Unicode.Scalar) {
+        guard let byte = UInt8(exactly: scalar.value) else {
+            self.wrapPending = false
+            self.escapeState = nil
             return
         }
 
-        switch slot {
-        case .g0:
-            self.g0CharacterSet = characterSet
-        case .g1:
-            self.g1CharacterSet = characterSet
+        switch byte {
+        case 0x20...0x2f:
+            self.escapeState = .escapeIntermediate(String(scalar))
+        case 0x5b:
+            self.escapeState = .csi(CSIState())
+        case 0x50:
+            self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
+        case 0x58:
+            self.escapeState = .stringControl(StringControlState(kind: .startOfString))
+        case 0x5d:
+            self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
+        case 0x5e:
+            self.escapeState = .stringControl(StringControlState(kind: .privacyMessage))
+        case 0x5f:
+            self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
+        case 0x30...0x4f, 0x51...0x57, 0x59, 0x5a, 0x5c, 0x60...0x7e:
+            self.dispatchEscape(finalByte: byte, intermediates: "")
+        default:
+            self.wrapPending = false
+            self.escapeState = nil
         }
+    }
+
+    private mutating func consumeEscapeIntermediateToken(
+        _ token: MoshTerminalInputToken,
+        intermediates: String
+    ) {
+        switch token {
+        case .scalar(let scalar):
+            if Self.isHighUnicodeParserScalar(scalar) {
+                self.wrapPending = false
+                self.escapeState = nil
+                return
+            }
+
+            guard let byte = UInt8(exactly: scalar.value) else {
+                self.escapeState = .escapeIntermediate(intermediates)
+                return
+            }
+
+            if (0x20...0x2f).contains(byte) {
+                var nextIntermediates = intermediates
+                if nextIntermediates.unicodeScalars.count < Self.maximumEscapeIntermediateScalars {
+                    nextIntermediates.unicodeScalars.append(scalar)
+                }
+                self.escapeState = .escapeIntermediate(nextIntermediates)
+            } else if (0x30...0x7e).contains(byte) {
+                self.dispatchEscape(finalByte: byte, intermediates: intermediates)
+            } else {
+                self.escapeState = .escapeIntermediate(intermediates)
+            }
+        case .control(let control):
+            self.consumeEscapeControl(control, continuing: .escapeIntermediate(intermediates))
+        }
+    }
+
+    private mutating func consumeEscapeControl(_ control: MoshTerminalControl, continuing state: EscapeState) {
+        switch control {
+        case .escape:
+            self.escapeState = .escape
+        case .bell, .backspace, .horizontalTab, .lineFeed, .carriageReturn:
+            self.apply(control)
+            self.escapeState = state
+        case .null:
+            self.wrapPending = false
+            self.escapeState = state
+        case .c0(let byte):
+            if byte == 0x18 || byte == 0x1a {
+                self.wrapPending = false
+                self.escapeState = nil
+            } else if Self.isC0PrimeControl(byte) {
+                self.apply(control)
+                if byte != 0x0e, byte != 0x0f {
+                    self.wrapPending = false
+                }
+                self.escapeState = state
+            }
+        case .c1(let byte):
+            self.consumeCSIAnywhereC1(byte)
+        case .delete:
+            self.escapeState = state
+        }
+    }
+
+    private mutating func dispatchEscape(finalByte byte: UInt8, intermediates: String) {
+        if intermediates.isEmpty {
+            if self.dispatchBareEscapedC1(finalByte: byte) {
+                return
+            }
+
+            switch byte {
+            case UInt8(ascii: "7"):
+                self.wrapPending = false
+                self.saveCursorState()
+            case UInt8(ascii: "8"):
+                self.wrapPending = false
+                self.restoreCursorState()
+            case UInt8(ascii: "c"):
+                self.reset()
+                return
+            default:
+                self.wrapPending = false
+            }
+            self.escapeState = nil
+            return
+        }
+
+        if intermediates == "#", byte == UInt8(ascii: "8") {
+            self.screenAlignmentTest()
+            self.escapeState = nil
+            return
+        }
+
+        self.wrapPending = false
+        self.escapeState = nil
+    }
+
+    private mutating func dispatchBareEscapedC1(finalByte byte: UInt8) -> Bool {
+        guard (0x40...0x5f).contains(byte) else {
+            return false
+        }
+
+        let controlByte = byte + 0x40
+        switch controlByte {
+        case 0x84, 0x85, 0x88, 0x8d:
+            self.apply(.c1(controlByte))
+        default:
+            self.wrapPending = false
+        }
+        self.escapeState = nil
+        return true
     }
 
     private mutating func screenAlignmentTest() {
         self.rows = self.alignmentRows(dimensions: self.dimensions)
-        self.cursor = MoshTerminalCursor(row: 0, column: 0)
-        self.scrollRegion = .full(rowCount: self.rows.count)
-        self.currentAttributes = .default
         self.wrapPending = false
-        self.originMode = false
     }
 
     private mutating func consumeStringControl(
         token: MoshTerminalInputToken,
         state: StringControlState
     ) {
+        if self.consumeStringControlAnywhere(token: token, state: state) {
+            return
+        }
+
         switch token {
         case .control(.bell) where state.kind == .operatingSystemCommand:
             self.finishStringControl(state)
@@ -976,6 +1182,56 @@ public struct MoshTerminalScreen: Sendable {
         }
     }
 
+    private mutating func consumeStringControlAnywhere(
+        token: MoshTerminalInputToken,
+        state: StringControlState
+    ) -> Bool {
+        switch token {
+        case .control(.escape):
+            self.finishStringControl(state)
+            self.escapeState = .escape
+            return true
+        case .control(.c0(let byte)) where byte == 0x18 || byte == 0x1a:
+            self.finishStringControl(state)
+            self.wrapPending = false
+            self.escapeState = nil
+            return true
+        case .control(.c1(let byte)):
+            self.finishStringControl(state)
+            return self.consumeStringControlAnywhereC1(byte)
+        default:
+            return false
+        }
+    }
+
+    private mutating func consumeStringControlAnywhereC1(_ byte: UInt8) -> Bool {
+        if Self.isExecuteAndGroundC1(byte) {
+            self.apply(.c1(byte))
+            self.escapeState = nil
+            return true
+        }
+
+        switch byte {
+        case 0x90:
+            self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
+        case 0x98:
+            self.escapeState = .stringControl(StringControlState(kind: .startOfString))
+        case 0x9b:
+            self.escapeState = .csi(CSIState())
+        case 0x9c:
+            self.escapeState = nil
+        case 0x9d:
+            self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
+        case 0x9e:
+            self.escapeState = .stringControl(StringControlState(kind: .privacyMessage))
+        case 0x9f:
+            self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
+        default:
+            return false
+        }
+        return true
+    }
+
     private mutating func finishStringControl(_ state: StringControlState) {
         guard state.kind == .operatingSystemCommand else {
             return
@@ -989,13 +1245,22 @@ public struct MoshTerminalScreen: Sendable {
         to state: StringControlState
     ) -> StringControlState {
         guard state.kind == .operatingSystemCommand,
-              state.payload.unicodeScalars.count < Self.maximumStringControlPayloadScalars,
-              case .scalar(let scalar) = token else {
+              state.payload.unicodeScalars.count < Self.maximumStringControlPayloadScalars else {
+            return state
+        }
+
+        let payloadScalar: Unicode.Scalar
+        switch token {
+        case .scalar(let scalar):
+            payloadScalar = scalar
+        case .control(.delete):
+            payloadScalar = Unicode.Scalar(0x7f)!
+        default:
             return state
         }
 
         var nextState = state
-        nextState.payload.unicodeScalars.append(scalar)
+        nextState.payload.unicodeScalars.append(payloadScalar)
         return nextState
     }
 
@@ -1073,29 +1338,60 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private mutating func consumeCSI(scalar: Unicode.Scalar, state: CSIState) {
+        if Self.isHighUnicodeParserScalar(scalar) {
+            if state.isIgnoring == false {
+                self.wrapPending = false
+            }
+            self.escapeState = nil
+            return
+        }
+
         guard let byte = UInt8(exactly: scalar.value) else {
             self.escapeState = nil
             return
         }
 
-        if (0x30...0x3f).contains(byte) {
-            guard state.intermediates.isEmpty, state.parameters.count < 64 else {
-                self.escapeState = nil
+        if state.isIgnoring {
+            self.escapeState = (0x40...0x7e).contains(byte) ? nil : .csi(state)
+            return
+        }
+
+        if byte == 0x3a {
+            self.escapeState = .csi(state.ignoring())
+            return
+        }
+
+        if (0x30...0x39).contains(byte) || byte == 0x3b {
+            guard state.intermediates.isEmpty else {
+                self.escapeState = .csi(state.ignoring())
                 return
             }
             var nextState = state
-            nextState.parameters += String(scalar)
+            if nextState.parameters.count < Self.maximumCSIParameterScalars {
+                nextState.parameters += String(scalar)
+            }
+            self.escapeState = .csi(nextState)
+            return
+        }
+
+        if (0x3c...0x3f).contains(byte) {
+            guard state.parameters.isEmpty, state.intermediates.isEmpty else {
+                self.escapeState = .csi(state.ignoring())
+                return
+            }
+            var nextState = state
+            if nextState.parameters.count < Self.maximumCSIParameterScalars {
+                nextState.parameters += String(scalar)
+            }
             self.escapeState = .csi(nextState)
             return
         }
 
         if (0x20...0x2f).contains(byte) {
-            guard state.intermediates.count < 4 else {
-                self.escapeState = nil
-                return
-            }
             var nextState = state
-            nextState.intermediates += String(scalar)
+            if nextState.intermediates.count < Self.maximumCSIIntermediateScalars {
+                nextState.intermediates += String(scalar)
+            }
             self.escapeState = .csi(nextState)
             return
         }
@@ -1113,6 +1409,59 @@ public struct MoshTerminalScreen: Sendable {
         self.escapeState = nil
     }
 
+    private mutating func consumeCSIControl(_ control: MoshTerminalControl) {
+        switch control {
+        case .escape:
+            self.escapeState = .escape
+        case .bell, .backspace, .horizontalTab, .lineFeed, .carriageReturn:
+            self.apply(control)
+        case .null:
+            self.wrapPending = false
+        case .c0(let byte):
+            if byte == 0x18 || byte == 0x1a {
+                self.wrapPending = false
+                self.escapeState = nil
+            } else if Self.isExecutableC0InCSI(byte) {
+                self.wrapPending = false
+            }
+        case .c1(let byte):
+            self.consumeCSIAnywhereC1(byte)
+        case .delete:
+            break
+        }
+    }
+
+    private mutating func consumeCSIAnywhereC1(_ byte: UInt8) {
+        if Self.isExecuteAndGroundC1(byte) {
+            let before = self.wrapPending
+            self.apply(.c1(byte))
+            if before == self.wrapPending {
+                self.wrapPending = false
+            }
+            self.escapeState = nil
+            return
+        }
+
+        switch byte {
+        case 0x90:
+            self.escapeState = .stringControl(StringControlState(kind: .deviceControl))
+        case 0x98:
+            self.escapeState = .stringControl(StringControlState(kind: .startOfString))
+        case 0x9b:
+            self.escapeState = .csi(CSIState())
+        case 0x9c:
+            self.escapeState = nil
+        case 0x9d:
+            self.escapeState = .stringControl(StringControlState(kind: .operatingSystemCommand))
+        case 0x9e:
+            self.escapeState = .stringControl(StringControlState(kind: .privacyMessage))
+        case 0x9f:
+            self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
+        default:
+            break
+        }
+    }
+
     private mutating func executeCSI(finalByte: UInt8, parameters: String, intermediates: String) {
         if intermediates == "!", finalByte == UInt8(ascii: "p") {
             self.softReset()
@@ -1125,7 +1474,14 @@ public struct MoshTerminalScreen: Sendable {
         }
 
         let values = Self.parseCSIParameters(parameters)
-        let isPrivate = parameters.first == "?"
+        let privateDispatchPrefix = Self.csiPrivateDispatchPrefix(parameters)
+        let isDECPrivate = privateDispatchPrefix == "?"
+
+        if let privateDispatchPrefix,
+           Self.isRegisteredPrivateCSIDispatch(prefix: privateDispatchPrefix, finalByte: finalByte) == false {
+            self.wrapPending = false
+            return
+        }
 
         switch finalByte {
         case UInt8(ascii: "@"):
@@ -1179,6 +1535,8 @@ public struct MoshTerminalScreen: Sendable {
                 row: self.cursor.row,
                 column: Self.parameter(values, at: 0, default: 1) - 1
             )
+        case UInt8(ascii: "c"):
+            self.reportDeviceAttributes(parameters: parameters)
         case UInt8(ascii: "d"):
             self.setPositionedCursor(
                 row: Self.parameter(values, at: 0, default: 1) - 1,
@@ -1190,19 +1548,23 @@ public struct MoshTerminalScreen: Sendable {
                 preservingPendingWrap: true
             )
         case UInt8(ascii: "h"):
-            if isPrivate {
+            if isDECPrivate {
                 values.compactMap { $0 }.forEach { self.setPrivateMode($0, enabled: true) }
             } else {
                 values.compactMap { $0 }.forEach { self.setMode($0, enabled: true) }
+                self.wrapPending = false
             }
         case UInt8(ascii: "l"):
-            if isPrivate {
+            if isDECPrivate {
                 values.compactMap { $0 }.forEach { self.setPrivateMode($0, enabled: false) }
             } else {
                 values.compactMap { $0 }.forEach { self.setMode($0, enabled: false) }
+                self.wrapPending = false
             }
         case UInt8(ascii: "m"):
             self.applySGR(parameters: values)
+        case UInt8(ascii: "n"):
+            self.reportDeviceStatus(parameters: parameters, values: values)
         case UInt8(ascii: "r"):
             self.setScrollRegion(parameters: values)
         default:
@@ -1214,12 +1576,14 @@ public struct MoshTerminalScreen: Sendable {
     private mutating func reset() {
         self.rows = Self.blankRows(dimensions: self.dimensions)
         self.cursor = MoshTerminalCursor(row: 0, column: 0)
+        self.activeGraphemeCursor = self.cursor
         self.scrollRegion = .full(rowCount: self.rows.count)
         self.currentAttributes = .default
         self.normalSavedCursorState = nil
         self.escapeState = nil
         self.wrapPending = false
         self.tabStops = Self.defaultTabStops(columnCount: Int(self.dimensions.columns))
+        self.defaultTabStopsEnabled = true
         self.originMode = false
         self.autoWrapMode = true
         self.insertMode = false
@@ -1234,9 +1598,33 @@ public struct MoshTerminalScreen: Sendable {
         self.windowTitle = ""
         self.clipboard = ""
         self.currentHyperlink = nil
-        self.g0CharacterSet = .usASCII
-        self.g1CharacterSet = .usASCII
-        self.activeCharacterSetSlot = .g0
+    }
+
+    private mutating func reportDeviceAttributes(parameters: String) {
+        self.wrapPending = false
+        if parameters.first == ">" {
+            self.appendTerminalToHostBytes(Self.secondaryDeviceAttributesReply)
+        } else if Self.hasPrivateCSIParameterPrefix(parameters) == false {
+            self.appendTerminalToHostBytes(Self.primaryDeviceAttributesReply)
+        }
+    }
+
+    private mutating func reportDeviceStatus(parameters: String, values: [Int?]) {
+        self.wrapPending = false
+        guard Self.hasPrivateCSIParameterPrefix(parameters) == false else {
+            return
+        }
+
+        switch Self.parameter(values, at: 0, default: 0) {
+        case 5:
+            self.appendTerminalToHostBytes(Self.deviceStatusOKReply)
+        case 6:
+            self.appendTerminalToHostBytes(
+                Array("\u{1b}[\(self.cursor.row + 1);\(self.cursor.column + 1)R".utf8)
+            )
+        default:
+            break
+        }
     }
 
     private mutating func softReset() {
@@ -1258,6 +1646,7 @@ public struct MoshTerminalScreen: Sendable {
             row: targetRow,
             column: min(max(self.cursor.column + columnDelta, 0), self.maximumColumn)
         )
+        self.markActiveGraphemeAtCursor()
         self.wrapPending = false
     }
 
@@ -1267,6 +1656,7 @@ public struct MoshTerminalScreen: Sendable {
             row: targetRow,
             column: min(max(column, 0), self.maximumColumn)
         )
+        self.markActiveGraphemeAtCursor()
         self.wrapPending = false
     }
 
@@ -1278,6 +1668,7 @@ public struct MoshTerminalScreen: Sendable {
             row: targetRow,
             column: min(max(column, 0), self.maximumColumn)
         )
+        self.markActiveGraphemeAtCursor()
         self.wrapPending = false
     }
 
@@ -1286,6 +1677,7 @@ public struct MoshTerminalScreen: Sendable {
             row: self.originMode ? self.scrollRegion.top : 0,
             column: 0
         )
+        self.markActiveGraphemeAtCursor()
         self.wrapPending = false
     }
 
@@ -1297,7 +1689,7 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private var relativeCursorRowBounds: ClosedRange<Int> {
-        if self.scrollRegion.contains(row: self.cursor.row) {
+        if self.originMode {
             return self.scrollRegion.range
         }
         return 0...self.maximumRow
@@ -1386,6 +1778,7 @@ public struct MoshTerminalScreen: Sendable {
         case 0:
             self.tabStops.remove(self.cursor.column)
         case 3:
+            self.defaultTabStopsEnabled = false
             self.tabStops.removeAll()
         default:
             break
@@ -1507,13 +1900,17 @@ public struct MoshTerminalScreen: Sendable {
                 )
             case 38:
                 if let result = Self.extendedColor(values: values, startIndex: index + 1) {
-                    self.currentAttributes.foregroundColor = result.color
+                    if let color = result.color {
+                        self.currentAttributes.foregroundColor = color
+                    }
                     index = result.nextIndex
                     continue
                 }
             case 48:
                 if let result = Self.extendedColor(values: values, startIndex: index + 1) {
-                    self.currentAttributes.backgroundColor = result.color
+                    if let color = result.color {
+                        self.currentAttributes.backgroundColor = color
+                    }
                     index = result.nextIndex
                     continue
                 }
@@ -1532,39 +1929,108 @@ public struct MoshTerminalScreen: Sendable {
         return .ansi(color, isBright: isBright)
     }
 
+    private static func indexedColor(_ index: UInt8) -> MoshTerminalColor {
+        switch index {
+        case 0...7:
+            return Self.ansiColor(code: Int(index), isBright: false) ?? .indexed(index)
+        case 8...15:
+            return Self.ansiColor(code: Int(index) - 8, isBright: true) ?? .indexed(index)
+        default:
+            return .indexed(index)
+        }
+    }
+
     private static func extendedColor(
         values: [Int],
         startIndex: Int
-    ) -> (color: MoshTerminalColor, nextIndex: Int)? {
+    ) -> (color: MoshTerminalColor?, nextIndex: Int)? {
         guard startIndex < values.count else {
             return nil
         }
 
         switch values[startIndex] {
         case 5:
-            guard startIndex + 1 < values.count,
-                  let index = UInt8(exactly: values[startIndex + 1]) else {
+            guard startIndex + 1 < values.count else {
                 return nil
             }
-            return (.indexed(index), startIndex + 2)
+            guard let index = UInt8(exactly: values[startIndex + 1]) else {
+                return (nil, startIndex + 2)
+            }
+            return (Self.indexedColor(index), startIndex + 2)
         case 2:
-            guard startIndex + 3 < values.count,
-                  let red = UInt8(exactly: values[startIndex + 1]),
-                  let green = UInt8(exactly: values[startIndex + 2]),
-                  let blue = UInt8(exactly: values[startIndex + 3]) else {
+            guard startIndex + 3 < values.count else {
                 return nil
             }
-            return (.rgb(red: red, green: green, blue: blue), startIndex + 4)
+            let color = Self.trueColor(
+                red: values[startIndex + 1],
+                green: values[startIndex + 2],
+                blue: values[startIndex + 3]
+            )
+            return (color, startIndex + 4)
         default:
             return nil
         }
     }
 
+    private static func trueColor(red: Int, green: Int, blue: Int) -> MoshTerminalColor {
+        // Official Mosh packs unmasked RGB parameters into a 25-bit rendition field.
+        let trueColorMask = 0x01_00_00_00
+        let storageMask = 0x01_ff_ff_ff
+        let packed = (trueColorMask | (red << 16) | (green << 8) | blue) & storageMask
+        return .rgb(
+            red: UInt8(truncatingIfNeeded: packed >> 16),
+            green: UInt8(truncatingIfNeeded: packed >> 8),
+            blue: UInt8(truncatingIfNeeded: packed)
+        )
+    }
+
     private static func parseCSIParameters(_ parameters: String) -> [Int?] {
         let normalized = parameters.first == "?" ? parameters.dropFirst() : Substring(parameters)
         return normalized.split(separator: ";", omittingEmptySubsequences: false).map { field in
-            field.isEmpty ? nil : Int(field)
+            guard field.isEmpty == false,
+                  let value = Int(field),
+                  value <= Self.maximumCSIParameterValue else {
+                return nil
+            }
+            return value
         }
+    }
+
+    private static func hasPrivateCSIParameterPrefix(_ parameters: String) -> Bool {
+        Self.csiPrivateDispatchPrefix(parameters) != nil
+    }
+
+    private static func csiPrivateDispatchPrefix(_ parameters: String) -> Character? {
+        guard let first = parameters.first, "?<=>".contains(first) else {
+            return nil
+        }
+        return first
+    }
+
+    private static func isRegisteredPrivateCSIDispatch(prefix: Character, finalByte: UInt8) -> Bool {
+        switch (prefix, finalByte) {
+        case ("?", UInt8(ascii: "h")), ("?", UInt8(ascii: "l")):
+            true
+        case (">", UInt8(ascii: "c")):
+            true
+        default:
+            false
+        }
+    }
+
+    private static func isExecutableC0InCSI(_ byte: UInt8) -> Bool {
+        Self.isC0PrimeControl(byte)
+    }
+
+    private static func isC0PrimeControl(_ byte: UInt8) -> Bool {
+        byte <= 0x17 || byte == 0x19 || (0x1c...0x1f).contains(byte)
+    }
+
+    private static func isExecuteAndGroundC1(_ byte: UInt8) -> Bool {
+        (0x80...0x8f).contains(byte)
+            || (0x91...0x97).contains(byte)
+            || byte == 0x99
+            || byte == 0x9a
     }
 
     private static func parameter(_ parameters: [Int?], at index: Int, default defaultValue: Int) -> Int {
@@ -1576,6 +2042,10 @@ public struct MoshTerminalScreen: Sendable {
 
     private static func isASCII(_ scalar: Unicode.Scalar, _ byte: UInt8) -> Bool {
         scalar.value == UInt32(byte)
+    }
+
+    private static func isHighUnicodeParserScalar(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.value >= 0xa0
     }
 
     private static func string<C: Collection>(from scalars: C) -> String where C.Element == Unicode.Scalar {
@@ -1712,122 +2182,20 @@ public struct MoshTerminalScreen: Sendable {
 private enum EscapeState: Equatable, Sendable {
     case escape
     case csi(CSIState)
-    case characterSetDesignation(MoshTerminalCharacterSetSlot)
-    case escapeHash
+    case escapeIntermediate(String)
     case stringControl(StringControlState)
-}
-
-private enum MoshTerminalCharacterSetSlot: Equatable, Sendable {
-    case g0
-    case g1
-}
-
-private enum MoshTerminalCharacterSet: Equatable, Sendable {
-    case usASCII
-    case decSpecialGraphics
-
-    init?(designationFinal scalar: Unicode.Scalar) {
-        switch scalar {
-        case "0":
-            self = .decSpecialGraphics
-        case "B":
-            self = .usASCII
-        default:
-            return nil
-        }
-    }
-
-    func map(_ scalar: Unicode.Scalar) -> Unicode.Scalar {
-        switch self {
-        case .usASCII:
-            return scalar
-        case .decSpecialGraphics:
-            return Self.decSpecialGraphicsScalar(for: scalar)
-        }
-    }
-
-    private static func decSpecialGraphicsScalar(for scalar: Unicode.Scalar) -> Unicode.Scalar {
-        switch scalar.value {
-        case 0x5f:
-            return Self.scalar(0x25ae)
-        case 0x60:
-            return Self.scalar(0x25c6)
-        case 0x61:
-            return Self.scalar(0x2592)
-        case 0x62:
-            return Self.scalar(0x2409)
-        case 0x63:
-            return Self.scalar(0x240c)
-        case 0x64:
-            return Self.scalar(0x240d)
-        case 0x65:
-            return Self.scalar(0x240a)
-        case 0x66:
-            return Self.scalar(0x00b0)
-        case 0x67:
-            return Self.scalar(0x00b1)
-        case 0x68:
-            return Self.scalar(0x2424)
-        case 0x69:
-            return Self.scalar(0x240b)
-        case 0x6a:
-            return Self.scalar(0x2518)
-        case 0x6b:
-            return Self.scalar(0x2510)
-        case 0x6c:
-            return Self.scalar(0x250c)
-        case 0x6d:
-            return Self.scalar(0x2514)
-        case 0x6e:
-            return Self.scalar(0x253c)
-        case 0x6f:
-            return Self.scalar(0x23ba)
-        case 0x70:
-            return Self.scalar(0x23bb)
-        case 0x71:
-            return Self.scalar(0x2500)
-        case 0x72:
-            return Self.scalar(0x23bc)
-        case 0x73:
-            return Self.scalar(0x23bd)
-        case 0x74:
-            return Self.scalar(0x251c)
-        case 0x75:
-            return Self.scalar(0x2524)
-        case 0x76:
-            return Self.scalar(0x2534)
-        case 0x77:
-            return Self.scalar(0x252c)
-        case 0x78:
-            return Self.scalar(0x2502)
-        case 0x79:
-            return Self.scalar(0x2264)
-        case 0x7a:
-            return Self.scalar(0x2265)
-        case 0x7b:
-            return Self.scalar(0x03c0)
-        case 0x7c:
-            return Self.scalar(0x2260)
-        case 0x7d:
-            return Self.scalar(0x00a3)
-        case 0x7e:
-            return Self.scalar(0x00b7)
-        default:
-            return scalar
-        }
-    }
-
-    private static func scalar(_ value: UInt32) -> Unicode.Scalar {
-        guard let scalar = Unicode.Scalar(value) else {
-            preconditionFailure("Invalid Unicode scalar in DEC Special Graphics mapping")
-        }
-        return scalar
-    }
 }
 
 private struct CSIState: Equatable, Sendable {
     var parameters: String = ""
     var intermediates: String = ""
+    var isIgnoring = false
+
+    func ignoring() -> CSIState {
+        var nextState = self
+        nextState.isIgnoring = true
+        return nextState
+    }
 }
 
 private enum StringControlKind: Equatable, Sendable {

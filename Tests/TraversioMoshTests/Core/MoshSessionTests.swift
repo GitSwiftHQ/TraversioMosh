@@ -282,6 +282,231 @@ struct MoshSessionTests {
     }
 
     @Test
+    func localPredictionDisplaysTypeaheadAfterServerEchoConfirmsEpoch() async throws {
+        let fixture = try await makeSessionFixture(
+            columns: 4,
+            rows: 1,
+            predictionConfiguration: MoshPredictionConfiguration(displayPreference: .always)
+        )
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            try await fixture.session.sendKeystrokes(Array("a".utf8))
+
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["    "])
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(.write(MoshTerminalOutput(bytes: Array("a".utf8))))
+            hostState.append(.echoAcknowledgement(2))
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            let hostOperations = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            #expect(hostOperations == [
+                .write(MoshTerminalOutput(bytes: Array("a".utf8))),
+                .echoAcknowledgement(2),
+            ])
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["a   "])
+
+            try await fixture.session.sendKeystrokes(Array("b".utf8))
+
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["ab  "])
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            hostOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
+    func adaptivePredictionDisplaysDelayedPendingTypeaheadWithGlitchUnderline() async throws {
+        let fixture = try await makeSessionFixture(
+            columns: 4,
+            rows: 1,
+            predictionConfiguration: MoshPredictionConfiguration(displayPreference: .adaptive)
+        )
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            try await fixture.session.sendKeystrokes(Array("a".utf8))
+
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["    "])
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(.write(MoshTerminalOutput(bytes: Array("a".utf8))))
+            hostState.append(.echoAcknowledgement(2))
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            _ = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["a   "])
+
+            try await fixture.session.sendKeystrokes(Array("b".utf8))
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["a   "])
+
+            await fixture.clock.advance(byMilliseconds: 249)
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["a   "])
+
+            await fixture.clock.advance(byMilliseconds: 1)
+            let delayedSnapshot = await fixture.session.screenSnapshot
+            #expect(delayedSnapshot.lineStrings == ["ab  "])
+            #expect(delayedSnapshot.rows[0][1].attributes.isUnderlined == false)
+
+            await fixture.clock.advance(byMilliseconds: 4_750)
+            let underlinedSnapshot = await fixture.session.screenSnapshot
+            #expect(underlinedSnapshot.lineStrings == ["ab  "])
+            #expect(underlinedSnapshot.rows[0][1].attributes.isUnderlined == true)
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            hostOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
+    func disabledPredictionKeepsScreenAtConfirmedHostState() async throws {
+        let fixture = try await makeSessionFixture(
+            columns: 4,
+            rows: 1,
+            predictionConfiguration: MoshPredictionConfiguration(displayPreference: .never)
+        )
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            try await fixture.session.sendKeystrokes(Array("a".utf8))
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(.write(MoshTerminalOutput(bytes: Array("a".utf8))))
+            hostState.append(.echoAcknowledgement(2))
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            _ = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+
+            try await fixture.session.sendKeystrokes(Array("b".utf8))
+
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["a   "])
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            hostOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
+    func localPredictionDoesNotRenderUnsupportedEscapeFinalAsPrintable() async throws {
+        let fixture = try await makeSessionFixture(
+            columns: 4,
+            rows: 1,
+            predictionConfiguration: MoshPredictionConfiguration(displayPreference: .always)
+        )
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            try await fixture.session.sendKeystrokes(Array("a".utf8))
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(.write(MoshTerminalOutput(bytes: Array("a".utf8))))
+            hostState.append(.echoAcknowledgement(2))
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            _ = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["a   "])
+
+            try await fixture.session.sendKeystrokes([0x1b, UInt8(ascii: "x")])
+
+            #expect(await fixture.session.screenSnapshot.lineStrings == ["a   "])
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            hostOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
+    func terminalGeneratedRepliesAreSentAsClientKeystrokes() async throws {
+        let fixture = try await makeSessionFixture(columns: 4, rows: 2)
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 1)
+        let hostOutput = MoshHostOperation.write(
+            MoshTerminalOutput(bytes: Array("AB\u{1b}[6n".utf8))
+        )
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(hostOutput)
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            let hostOperations = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let finalClientState = try #require(serverInstructions.last).instructionResult.latestState.state
+            let screenSnapshot = await fixture.session.screenSnapshot
+
+            #expect(hostOperations == [hostOutput])
+            #expect(finalClientState.operations == [
+                .resize(try MoshTerminalDimensions(columns: 4, rows: 2)),
+                .keystrokes(Array("\u{1b}[1;3R".utf8)),
+            ])
+            #expect(screenSnapshot.lineStrings == ["AB  ", "    "])
+            #expect(screenSnapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            serverInstructionTask.cancel()
+            hostOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
     func terminalInputWithoutExplicitModePreservesTerminalBytesForServerTranslation() async throws {
         let fixture = try await makeSessionFixture(columns: 80, rows: 24)
         let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
@@ -688,7 +913,8 @@ struct MoshSessionTests {
             timeoutMilliseconds: 1_000
         )
         let fixture = try await makeSessionFixture(columns: 80, rows: 24, timing: timing)
-        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
+        let initialInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 1)
+        var shutdownInstructionTask: Task<[MoshSSPDatagramIncomingInstruction<MoshTerminalClientState>], Error>?
         var shutdownTask: Task<Void, Error>?
 
         do {
@@ -703,6 +929,13 @@ struct MoshSessionTests {
             let resumedInitialSend = await fixture.timer.resumeNextSleep(milliseconds: initialSendWait)
             try #require(resumedInitialSend)
 
+            let initialInstructions = try await withSessionTimeout {
+                try await initialInstructionTask.value
+            }
+            let initialInstruction = try #require(initialInstructions.first)
+            #expect(initialInstruction.instructionResult.receiveResult == .accepted(newNumber: 1))
+
+            shutdownInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 1)
             shutdownTask = Task {
                 try await fixture.session.shutdown()
             }
@@ -715,13 +948,12 @@ struct MoshSessionTests {
             let resumedShutdownSend = await fixture.timer.resumeNextSleep(milliseconds: shutdownSendWait)
             try #require(resumedShutdownSend)
 
-            let serverInstructions = try await withSessionTimeout {
-                try await serverInstructionTask.value
+            let shutdownInstructionTask = try #require(shutdownInstructionTask)
+            let shutdownInstructions = try await withSessionTimeout {
+                try await shutdownInstructionTask.value
             }
-            let initialInstruction = try #require(serverInstructions.first)
-            let shutdownInstruction = try #require(serverInstructions.last)
+            let shutdownInstruction = try #require(shutdownInstructions.first)
 
-            #expect(initialInstruction.instructionResult.receiveResult == .accepted(newNumber: 1))
             #expect(shutdownInstruction.instructionResult.receiveResult == .accepted(newNumber: UInt64.max))
             #expect(shutdownInstruction.instructionResult.instruction.newNumber == UInt64.max)
             #expect(
@@ -743,8 +975,9 @@ struct MoshSessionTests {
 
             await fixture.serverRuntime.stop()
         } catch {
+            initialInstructionTask.cancel()
+            shutdownInstructionTask?.cancel()
             shutdownTask?.cancel()
-            serverInstructionTask.cancel()
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
             throw error
@@ -891,7 +1124,8 @@ private func makeSessionFixture(
         sendMinimumDelayMilliseconds: 0,
         timeoutMilliseconds: 1_000,
         shutdownMaximumAttempts: 16
-    )
+    ),
+    predictionConfiguration: MoshPredictionConfiguration = MoshPredictionConfiguration()
 ) async throws -> MoshSessionFixture {
     let pair = await MoshInMemoryDatagramLink.connectedPair()
     let clock = ManualMillisecondsClock()
@@ -907,7 +1141,8 @@ private func makeSessionFixture(
             clock: clock,
             timer: timer,
             timing: timing,
-            chaffSource: .none
+            chaffSource: .none,
+            predictionConfiguration: predictionConfiguration
         )
     )
     let serverRuntime = try makeServerRuntime(

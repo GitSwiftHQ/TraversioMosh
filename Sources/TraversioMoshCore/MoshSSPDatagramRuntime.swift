@@ -218,6 +218,14 @@ public actor MoshSSPDatagramRuntime<
         self.loop.knownAcknowledgedSendStateNumber
     }
 
+    public func lastSentSendStateNumber() -> UInt64 {
+        self.loop.lastSentSendStateNumber
+    }
+
+    public func sendIntervalMilliseconds() -> UInt64 {
+        self.loop.sendIntervalMilliseconds
+    }
+
     public func shutdownAcknowledged() -> Bool {
         self.loop.shutdownAcknowledged
     }
