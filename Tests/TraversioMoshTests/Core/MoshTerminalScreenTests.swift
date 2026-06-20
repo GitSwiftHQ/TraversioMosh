@@ -1115,6 +1115,31 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func csiInsertAndDeleteLinesMoveCursorToFirstColumn() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("aaaaabbbbbcccccddddd\u{1b}[2;3H\u{1b}[L".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["aaaaa", "     ", "bbbbb", "ccccc"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 0))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;4H\u{1b}[M".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["aaaaa", "bbbbb", "ccccc", "     "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 0))
+    }
+
+    @Test
+    func csiInsertLineOutsideScrollRegionStillClearsPendingWrapAndMovesToFirstColumn() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 3))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;3rabcd\u{1b}[LX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["Xbcd", "    ", "    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
     func csiScrollUpAndDownUseConfiguredScrollRegion() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 5))
 

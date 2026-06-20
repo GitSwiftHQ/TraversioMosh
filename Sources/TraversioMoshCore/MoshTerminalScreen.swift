@@ -601,6 +601,11 @@ public struct MoshTerminalScreen: Sendable {
     }
 
     private mutating func insertLines(count: Int) {
+        defer {
+            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
+            self.wrapPending = false
+        }
+
         guard self.scrollRegion.contains(row: self.cursor.row) else {
             return
         }
@@ -615,10 +620,14 @@ public struct MoshTerminalScreen: Sendable {
         let replacement = Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
             + Array(activeRows.dropLast(amount))
         self.replaceRows(in: range, with: replacement)
-        self.wrapPending = false
     }
 
     private mutating func deleteLines(count: Int) {
+        defer {
+            self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
+            self.wrapPending = false
+        }
+
         guard self.scrollRegion.contains(row: self.cursor.row) else {
             return
         }
@@ -633,7 +642,6 @@ public struct MoshTerminalScreen: Sendable {
         let replacement = Array(activeRows.dropFirst(amount))
             + Self.blankRows(rowCount: amount, columnCount: self.maximumColumn + 1)
         self.replaceRows(in: range, with: replacement)
-        self.wrapPending = false
     }
 
     private mutating func insertCharacters(count: Int) {
