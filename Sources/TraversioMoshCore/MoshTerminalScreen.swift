@@ -97,6 +97,7 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
     public let dimensions: MoshTerminalDimensions
     public let cursor: MoshTerminalCursor
     public let isCursorVisible: Bool
+    public let bellCount: UInt64
     public let rows: [[MoshTerminalCell]]
     public let lineRenditions: [MoshTerminalLineRendition]
 
@@ -104,12 +105,14 @@ public struct MoshTerminalScreenSnapshot: Equatable, Sendable {
         dimensions: MoshTerminalDimensions,
         cursor: MoshTerminalCursor,
         isCursorVisible: Bool = true,
+        bellCount: UInt64 = 0,
         rows: [[MoshTerminalCell]],
         lineRenditions: [MoshTerminalLineRendition]? = nil
     ) {
         self.dimensions = dimensions
         self.cursor = cursor
         self.isCursorVisible = isCursorVisible
+        self.bellCount = bellCount
         self.rows = rows
         self.lineRenditions = Self.normalizedLineRenditions(
             lineRenditions,
@@ -156,6 +159,7 @@ public struct MoshTerminalScreen: Sendable {
     private var autoWrapMode: Bool
     private var insertMode: Bool
     private var isCursorVisible: Bool
+    private var bellCount: UInt64
     private var g0CharacterSet: MoshTerminalCharacterSet
     private var g1CharacterSet: MoshTerminalCharacterSet
     private var activeCharacterSetSlot: MoshTerminalCharacterSetSlot
@@ -179,6 +183,7 @@ public struct MoshTerminalScreen: Sendable {
         self.autoWrapMode = true
         self.insertMode = false
         self.isCursorVisible = true
+        self.bellCount = 0
         self.g0CharacterSet = .usASCII
         self.g1CharacterSet = .usASCII
         self.activeCharacterSetSlot = .g0
@@ -189,6 +194,7 @@ public struct MoshTerminalScreen: Sendable {
             dimensions: self.dimensions,
             cursor: self.cursor,
             isCursorVisible: self.isCursorVisible,
+            bellCount: self.bellCount,
             rows: self.rows,
             lineRenditions: self.lineRenditions
         )
@@ -281,8 +287,10 @@ public struct MoshTerminalScreen: Sendable {
 
     private mutating func apply(_ control: MoshTerminalControl) {
         switch control {
-        case .null, .bell:
+        case .null:
             break
+        case .bell:
+            self.bellCount += 1
         case .backspace:
             self.wrapPending = false
             let column = self.previousCursorColumn()

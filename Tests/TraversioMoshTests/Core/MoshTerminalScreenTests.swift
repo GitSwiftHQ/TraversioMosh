@@ -92,6 +92,38 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func bellControlIncrementsSnapshotCountWithoutRendering() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{7}B\u{7}".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB "])
+        #expect(screen.snapshot.bellCount == 2)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func resetAndSoftResetPreserveBellCount() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{7}\u{1b}c\u{1b}[!p".utf8)))
+
+        #expect(screen.snapshot.bellCount == 1)
+        #expect(screen.snapshot.lineStrings == ["   "])
+    }
+
+    @Test
+    func oscBellTerminatorDoesNotIncrementBellCount() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}]2;title\u{7}X".utf8)))
+
+        #expect(screen.snapshot.bellCount == 0)
+        #expect(screen.snapshot.lineStrings == ["X  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
     func csiSoftResetRestoresModesWithoutClearingScreen() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 3))
 
