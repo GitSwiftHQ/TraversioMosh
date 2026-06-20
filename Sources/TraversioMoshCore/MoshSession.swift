@@ -96,6 +96,7 @@ public actor MoshSession {
     private let diagnosticEventContinuation: DiagnosticEventStream.Continuation
 
     private var terminalEngine: MoshTerminalStateEngine
+    private var terminalScreen: MoshTerminalScreen
     private var userInputTranslator: MoshTerminalUserInputTranslator
     private var runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>?
     private var receiveTask: Task<Void, Never>?
@@ -125,6 +126,9 @@ public actor MoshSession {
         var terminalEngine = MoshTerminalStateEngine()
         terminalEngine.enqueueClientOperation(.resize(configuration.initialTerminalDimensions))
         self.terminalEngine = terminalEngine
+        self.terminalScreen = MoshTerminalScreen(
+            dimensions: configuration.initialTerminalDimensions
+        )
         self.userInputTranslator = MoshTerminalUserInputTranslator()
     }
 
@@ -138,6 +142,10 @@ public actor MoshSession {
 
     public var snapshot: MoshTerminalSnapshot {
         self.terminalEngine.snapshot
+    }
+
+    public var screenSnapshot: MoshTerminalScreenSnapshot {
+        self.terminalScreen.snapshot
     }
 
     public func start() async throws {
@@ -231,6 +239,13 @@ public actor MoshSession {
         try await self.updateClientState(.keystrokes(translatedBytes))
     }
 
+    public func sendTerminalInput(_ bytes: [UInt8]) async throws {
+        try await self.sendTerminalInput(
+            bytes,
+            applicationCursorKeysEnabled: self.terminalScreen.snapshot.isApplicationCursorKeysEnabled
+        )
+    }
+
     public func resize(columns: Int32, rows: Int32) async throws {
         try await self.resize(MoshTerminalDimensions(columns: columns, rows: rows))
     }
@@ -275,12 +290,16 @@ public actor MoshSession {
 
     private func handleIncomingInstruction(
         _ instruction: MoshSSPDatagramIncomingInstruction<MoshTerminalHostState>
-    ) {
+    ) throws {
         let state = instruction.instructionResult.latestState
         let operations = self.terminalEngine.acceptHostState(state.state)
         for operation in operations {
+            let renderOperation = MoshTerminalRenderOperation(operation)
+            if let renderOperation {
+                try self.terminalScreen.apply(renderOperation)
+            }
             self.hostOperationContinuation.yield(operation)
-            if let renderOperation = MoshTerminalRenderOperation(operation) {
+            if let renderOperation {
                 self.renderOperationContinuation.yield(renderOperation)
             }
         }
@@ -356,7 +375,7 @@ public actor MoshSession {
                     guard let self else {
                         return
                     }
-                    await self.handleIncomingInstruction(instruction)
+                    try await self.handleIncomingInstruction(instruction)
                 }
 
                 guard let self else {

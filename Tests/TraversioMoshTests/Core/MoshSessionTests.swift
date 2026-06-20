@@ -242,6 +242,131 @@ struct MoshSessionTests {
     }
 
     @Test
+    func screenSnapshotProjectsHostRenderOperations() async throws {
+        let fixture = try await makeSessionFixture(columns: 3, rows: 2)
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
+        let hostDimensions = try MoshTerminalDimensions(columns: 4, rows: 2)
+        let hostOperations: [MoshHostOperation] = [
+            .write(MoshTerminalOutput(bytes: Array("ab\u{1b}[?1h".utf8))),
+            .resize(hostDimensions),
+        ]
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(contentsOf: hostOperations)
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            let receivedHostOperations = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            let screenSnapshot = await fixture.session.screenSnapshot
+
+            #expect(receivedHostOperations == hostOperations)
+            #expect(screenSnapshot.dimensions == hostDimensions)
+            #expect(screenSnapshot.lineStrings == ["ab  ", "    "])
+            #expect(screenSnapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+            #expect(screenSnapshot.isApplicationCursorKeysEnabled == true)
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            hostOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
+    func terminalInputUsesOwnedScreenApplicationCursorMode() async throws {
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24)
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 1)
+        let applicationCursorMode = MoshHostOperation.write(
+            MoshTerminalOutput(bytes: Array("\u{1b}[?1h".utf8))
+        )
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(applicationCursorMode)
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            let hostOperations = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            #expect(hostOperations == [applicationCursorMode])
+            #expect(await fixture.session.screenSnapshot.isApplicationCursorKeysEnabled == true)
+
+            try await fixture.session.sendTerminalInput([0x1b, UInt8(ascii: "O"), UInt8(ascii: "A")])
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let finalState = try #require(serverInstructions.last).instructionResult.latestState.state
+
+            #expect(
+                finalState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 80, rows: 24)),
+                    .keystrokes([0x1b, UInt8(ascii: "O"), UInt8(ascii: "A")]),
+                ]
+            )
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            serverInstructionTask.cancel()
+            hostOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
+    func localResizeDoesNotMutateScreenSnapshotBeforeHostResize() async throws {
+        let fixture = try await makeSessionFixture(columns: 3, rows: 2)
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
+        let initialDimensions = try MoshTerminalDimensions(columns: 3, rows: 2)
+        let resizedDimensions = try MoshTerminalDimensions(columns: 5, rows: 2)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            try await fixture.session.resize(resizedDimensions)
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let finalState = try #require(serverInstructions.last).instructionResult.latestState.state
+
+            #expect(
+                finalState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 3, rows: 2)),
+                    .resize(resizedDimensions),
+                ]
+            )
+            #expect(await fixture.session.screenSnapshot.dimensions == initialDimensions)
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            serverInstructionTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
     func lifecycleRejectsInvalidStartAndStoppedOperations() async throws {
         let fixture = try await makeSessionFixture(columns: 80, rows: 24)
 
