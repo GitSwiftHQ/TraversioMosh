@@ -797,11 +797,8 @@ public struct MoshTerminalScreen: Sendable {
         self.activeSavedCursorState = MoshTerminalSavedCursorState(
             cursor: self.cursor,
             attributes: self.currentAttributes,
-            wrapPending: self.wrapPending,
-            originMode: self.originMode,
-            g0CharacterSet: self.g0CharacterSet,
-            g1CharacterSet: self.g1CharacterSet,
-            activeCharacterSetSlot: self.activeCharacterSetSlot
+            autoWrapMode: self.autoWrapMode,
+            originMode: self.originMode
         )
     }
 
@@ -810,11 +807,8 @@ public struct MoshTerminalScreen: Sendable {
 
         self.cursor = self.clampedCursorForLineRendition(savedCursorState.cursor)
         self.currentAttributes = savedCursorState.attributes
-        self.wrapPending = savedCursorState.wrapPending
+        self.autoWrapMode = savedCursorState.autoWrapMode
         self.originMode = savedCursorState.originMode
-        self.g0CharacterSet = savedCursorState.g0CharacterSet
-        self.g1CharacterSet = savedCursorState.g1CharacterSet
-        self.activeCharacterSetSlot = savedCursorState.activeCharacterSetSlot
     }
 
     private var activeSavedCursorState: MoshTerminalSavedCursorState? {
@@ -899,9 +893,11 @@ public struct MoshTerminalScreen: Sendable {
         case (.escape, .scalar("_")):
             self.escapeState = .stringControl(StringControlState(kind: .applicationProgramCommand))
         case (.escape, .scalar("7")):
+            self.wrapPending = false
             self.saveCursorState()
             self.escapeState = nil
         case (.escape, .scalar("8")):
+            self.wrapPending = false
             self.restoreCursorState()
             self.escapeState = nil
         case (.escape, .scalar("H")):
@@ -1303,14 +1299,6 @@ public struct MoshTerminalScreen: Sendable {
             self.applySGR(parameters: values)
         case UInt8(ascii: "r"):
             self.setScrollRegion(parameters: values)
-        case UInt8(ascii: "s"):
-            if parameters.isEmpty {
-                self.saveCursorState()
-            }
-        case UInt8(ascii: "u"):
-            if parameters.isEmpty {
-                self.restoreCursorState()
-            }
         default:
             self.wrapPending = false
             break
@@ -1997,20 +1985,14 @@ private struct MoshTerminalSavedCursorState: Equatable, Sendable {
     static let `default` = MoshTerminalSavedCursorState(
         cursor: MoshTerminalCursor(row: 0, column: 0),
         attributes: .default,
-        wrapPending: false,
-        originMode: false,
-        g0CharacterSet: .usASCII,
-        g1CharacterSet: .usASCII,
-        activeCharacterSetSlot: .g0
+        autoWrapMode: true,
+        originMode: false
     )
 
     var cursor: MoshTerminalCursor
     var attributes: MoshTerminalTextAttributes
-    var wrapPending: Bool
+    var autoWrapMode: Bool
     var originMode: Bool
-    var g0CharacterSet: MoshTerminalCharacterSet
-    var g1CharacterSet: MoshTerminalCharacterSet
-    var activeCharacterSetSlot: MoshTerminalCharacterSetSlot
 
     func clamped(
         maximumRow: Int,
@@ -2023,11 +2005,8 @@ private struct MoshTerminalSavedCursorState: Equatable, Sendable {
                 maximumColumn: maximumColumn
             ),
             attributes: self.attributes,
-            wrapPending: self.wrapPending,
-            originMode: self.originMode,
-            g0CharacterSet: self.g0CharacterSet,
-            g1CharacterSet: self.g1CharacterSet,
-            activeCharacterSetSlot: self.activeCharacterSetSlot
+            autoWrapMode: self.autoWrapMode,
+            originMode: self.originMode
         )
     }
 }
