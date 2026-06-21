@@ -408,6 +408,29 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func privateDisplayModesSurviveScreenErase() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    "\u{1b}[?5h\u{1b}[?25l\u{1b}[?2004h\u{1b}[?1002h\u{1b}[?1006h\u{1b}[?1004h\u{1b}[?1007hAB\u{1b}[2JX".utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["  X ", "    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+        #expect(screen.snapshot.isCursorVisible == false)
+        #expect(screen.snapshot.isReverseVideoEnabled == true)
+        #expect(screen.snapshot.isBracketedPasteEnabled == true)
+        #expect(screen.snapshot.mouseReportingMode == .buttonEvent)
+        #expect(screen.snapshot.mouseEncodingMode == .sgr)
+        #expect(screen.snapshot.isMouseFocusEventEnabled == true)
+        #expect(screen.snapshot.isMouseAlternateScrollEnabled == true)
+    }
+
+    @Test
     func deccolmPrivateModeClearsScreenWithoutChangingDimensions() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
 
