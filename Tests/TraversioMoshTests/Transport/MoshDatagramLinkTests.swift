@@ -159,6 +159,54 @@ struct MoshDatagramLinkTests {
             throw error
         }
     }
+
+    @Test
+    func nwLinkPublishesReadyEventAndCurrentPathSnapshot() async throws {
+        let server = try LoopbackUDPEchoServer()
+        let port: NWEndpoint.Port
+        do {
+            port = try await withTimeout {
+                try await server.start()
+            }
+        } catch {
+            await server.stop()
+            throw error
+        }
+
+        let link = MoshNWDatagramLink(
+            endpoint: .hostPort(host: "127.0.0.1", port: port)
+        )
+        let readyEventTask = Task<MoshNWDatagramEvent?, Never> {
+            var iterator = link.events.makeAsyncIterator()
+            while let event = await iterator.next() {
+                if event == .stateChanged(.ready) {
+                    return event
+                }
+            }
+            return nil
+        }
+
+        do {
+            try await link.start()
+
+            let event = try await withTimeout {
+                await readyEventTask.value
+            }
+            let snapshot = try #require(await link.currentPathSnapshot())
+
+            #expect(event == .stateChanged(.ready))
+            #expect(snapshot.status == .satisfied)
+
+            readyEventTask.cancel()
+            await link.stop()
+            await server.stop()
+        } catch {
+            readyEventTask.cancel()
+            await link.stop()
+            await server.stop()
+            throw error
+        }
+    }
 }
 
 private actor LoopbackUDPEchoServer {

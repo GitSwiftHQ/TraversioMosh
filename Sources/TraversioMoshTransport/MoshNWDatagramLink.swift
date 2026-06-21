@@ -9,15 +9,18 @@ import Foundation
 
 public actor MoshNWDatagramLink: MoshDatagramLink {
     public nonisolated let incomingDatagrams: MoshDatagramStream
+    public nonisolated let events: MoshNWDatagramEventStream
 
     private let connection: NWConnection
     private let queue: DispatchQueue
     private let continuation: MoshDatagramStream.Continuation
+    private let eventContinuation: MoshNWDatagramEventStream.Continuation
     private var isStarted = false
     private var isStopped = false
     private var isReceiving = false
     private var nextSendID: UInt64 = 0
     private var pendingSends: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var latestPathSnapshot: MoshNWDatagramPathSnapshot?
 
     public init(
         endpoint: NWEndpoint,
@@ -25,8 +28,11 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         queue: DispatchQueue = DispatchQueue(label: "com.gitswift.TraversioMosh.NWDatagramLink")
     ) {
         let streamAndContinuation = Self.makeStream(bufferingPolicy: .bufferingNewest(256))
+        let eventStreamAndContinuation = Self.makeEventStream(bufferingPolicy: .bufferingNewest(256))
         self.incomingDatagrams = streamAndContinuation.stream
+        self.events = eventStreamAndContinuation.stream
         self.continuation = streamAndContinuation.continuation
+        self.eventContinuation = eventStreamAndContinuation.continuation
         self.connection = NWConnection(to: endpoint, using: parameters)
         self.queue = queue
     }
@@ -45,7 +51,29 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
                 await self.handleState(state)
             }
         }
+        self.connection.pathUpdateHandler = { path in
+            Task {
+                await self.handlePath(path)
+            }
+        }
+        self.connection.viabilityUpdateHandler = { isViable in
+            Task {
+                await self.handleViability(isViable)
+            }
+        }
+        self.connection.betterPathUpdateHandler = { hasBetterPath in
+            Task {
+                await self.handleBetterPath(hasBetterPath)
+            }
+        }
         self.connection.start(queue: self.queue)
+    }
+
+    public func currentPathSnapshot() -> MoshNWDatagramPathSnapshot? {
+        if let latestPathSnapshot {
+            return latestPathSnapshot
+        }
+        return self.connection.currentPath.map(MoshNWDatagramPathSnapshot.init)
     }
 
     public func send(_ datagram: [UInt8]) async throws {
@@ -87,9 +115,10 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         }
 
         self.isStopped = true
-        self.connection.stateUpdateHandler = nil
+        self.clearConnectionHandlers()
         self.connection.cancel()
         self.continuation.finish()
+        self.eventContinuation.finish()
         self.resumePendingSends(throwing: MoshDatagramTransportError.stopped)
     }
 
@@ -97,6 +126,8 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         guard self.isStopped == false else {
             return
         }
+
+        self.eventContinuation.yield(.stateChanged(MoshNWDatagramConnectionState(state)))
 
         switch state {
         case .ready:
@@ -110,6 +141,32 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         @unknown default:
             break
         }
+    }
+
+    private func handlePath(_ path: NWPath) {
+        guard self.isStopped == false else {
+            return
+        }
+
+        let snapshot = MoshNWDatagramPathSnapshot(path)
+        self.latestPathSnapshot = snapshot
+        self.eventContinuation.yield(.pathChanged(snapshot))
+    }
+
+    private func handleViability(_ isViable: Bool) {
+        guard self.isStopped == false else {
+            return
+        }
+
+        self.eventContinuation.yield(.viabilityChanged(isViable))
+    }
+
+    private func handleBetterPath(_ hasBetterPath: Bool) {
+        guard self.isStopped == false else {
+            return
+        }
+
+        self.eventContinuation.yield(.betterPathChanged(hasBetterPath))
     }
 
     private func scheduleReceive() {
@@ -168,15 +225,24 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         }
 
         self.isStopped = true
-        self.connection.stateUpdateHandler = nil
+        self.clearConnectionHandlers()
         self.connection.cancel()
         if let error {
             self.continuation.finish(throwing: error)
+            self.eventContinuation.finish()
             self.resumePendingSends(throwing: error)
         } else {
             self.continuation.finish()
+            self.eventContinuation.finish()
             self.resumePendingSends(throwing: MoshDatagramTransportError.stopped)
         }
+    }
+
+    private func clearConnectionHandlers() {
+        self.connection.stateUpdateHandler = nil
+        self.connection.pathUpdateHandler = nil
+        self.connection.viabilityUpdateHandler = nil
+        self.connection.betterPathUpdateHandler = nil
     }
 
     private func resumePendingSends(throwing error: Error) {
@@ -197,6 +263,24 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
 
         guard let capturedContinuation else {
             preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+
+        return (stream, capturedContinuation)
+    }
+
+    private static func makeEventStream(
+        bufferingPolicy: MoshNWDatagramEventStream.Continuation.BufferingPolicy
+    ) -> (
+        stream: MoshNWDatagramEventStream,
+        continuation: MoshNWDatagramEventStream.Continuation
+    ) {
+        var capturedContinuation: MoshNWDatagramEventStream.Continuation?
+        let stream = MoshNWDatagramEventStream(bufferingPolicy: bufferingPolicy) { continuation in
+            capturedContinuation = continuation
+        }
+
+        guard let capturedContinuation else {
+            preconditionFailure("AsyncStream did not provide a continuation")
         }
 
         return (stream, capturedContinuation)

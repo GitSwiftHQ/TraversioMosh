@@ -22,7 +22,9 @@ It currently includes tested bootstrap parsing, session-key validation,
 AES-128-OCB, packet nonce construction, protobuf2 wire messages, compression,
 fragmentation, SSP state handling, UDP datagram transport, encrypted datagram
 runtime, a public `MoshSession` facade, renderer-facing host operation streams,
-an internal terminal screen projection, and SSP graceful shutdown.
+an internal terminal screen projection, and SSP graceful shutdown. The
+Network.framework UDP transport also exposes connection/path diagnostic events
+and a current path snapshot for host apps that need network status visibility.
 
 `MoshSession` exposes raw keystroke sending, raw default terminal-input
 sending, explicit-mode terminal-input translation for callers that own that
@@ -39,8 +41,8 @@ terminal-state coverage continue to expand.
 - `TraversioMoshCore`: session API, lifecycle, SSP runtime coordination,
   client operation entry points, async host/render operation streams, and
   terminal state projection.
-- `TraversioMoshTransport`: UDP datagram transport abstraction and
-  Network.framework-backed implementation.
+- `TraversioMoshTransport`: UDP datagram transport abstraction,
+  Network.framework-backed implementation, and concrete transport diagnostics.
 - `TraversioMoshWire`: Mosh client/host instruction and codec boundary.
 - `TraversioMoshCrypto`: session-key validation and crypto boundary.
 - `TraversioMoshBootstrap`: `mosh-server` output parsing and an adapter protocol
