@@ -549,6 +549,21 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func applicationCursorModeDoesNotClearPendingWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[?1h".utf8)))
+
+        #expect(screen.snapshot.isApplicationCursorKeysEnabled == true)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("X\u{1b}[?1lY".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abc", "XY "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 2))
+        #expect(screen.snapshot.isApplicationCursorKeysEnabled == false)
+    }
+
+    @Test
     func originModeSequencesClearPendingWrapThroughOfficialHome() throws {
         var setModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
         var resetModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
