@@ -812,6 +812,20 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func shiftOutAndShiftInClearPendingWrapAsUnsupportedControls() throws {
+        var shiftOutScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+        var shiftInScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try shiftOutScreen.apply(MoshTerminalOutput(bytes: Array("abc\u{0e}X".utf8)))
+        try shiftInScreen.apply(MoshTerminalOutput(bytes: Array("abc\u{0f}X".utf8)))
+
+        #expect(shiftOutScreen.snapshot.lineStrings == ["abX", "   "])
+        #expect(shiftOutScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+        #expect(shiftInScreen.snapshot.lineStrings == ["abX", "   "])
+        #expect(shiftInScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func unsupportedG0DesignationDoesNotAffectLaterPrintableText() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
