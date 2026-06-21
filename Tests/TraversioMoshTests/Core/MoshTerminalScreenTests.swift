@@ -2379,6 +2379,34 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func printableISO88591LiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-LATIN1-OK"
+        let payload = "\u{1b}[2J\u{1b}[H"
+            + "A\u{00a1}B\u{00ff}C"
+            + "\u{1b}[2;40H\u{00a1}X"
+            + "\u{1b}[6;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "A\u{00a1}B\u{00ff}C" + String(repeating: " ", count: 35),
+            String(repeating: " ", count: 39) + "\u{00a1}",
+            "X" + String(repeating: " ", count: 39),
+            String(repeating: " ", count: 40),
+            String(repeating: " ", count: 40),
+            marker + String(repeating: " ", count: 40 - marker.count)
+        ])
+        #expect(screen.snapshot.rows[0][1].contents == "\u{00a1}")
+        #expect(screen.snapshot.rows[0][1].displayWidth == 1)
+        #expect(screen.snapshot.rows[0][3].contents == "\u{00ff}")
+        #expect(screen.snapshot.rows[0][3].displayWidth == 1)
+        #expect(screen.snapshot.rows[1][39].contents == "\u{00a1}")
+        #expect(screen.snapshot.rows[1][39].displayWidth == 1)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func printableISO88591FormatScalarsAreNarrowLikeOfficialMosh() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
