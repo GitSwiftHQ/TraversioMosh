@@ -2432,43 +2432,65 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
-    func emojiModifierAttachesToPreviousEmojiCell() throws {
-        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+    func emojiModifierScalarsOccupySeparateWideCellsLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
 
         try screen.apply(MoshTerminalOutput(bytes: Array("👍🏽X".utf8)))
 
-        #expect(screen.snapshot.lineStrings == ["👍🏽 X  "])
-        #expect(screen.snapshot.rows[0][0].contents == "👍🏽")
+        #expect(screen.snapshot.lineStrings == ["👍 🏽 X "])
+        #expect(screen.snapshot.rows[0][0].contents == "👍")
         #expect(screen.snapshot.rows[0][0].displayWidth == 2)
         #expect(screen.snapshot.rows[0][1].isContinuation == true)
-        #expect(screen.snapshot.rows[0][2].contents == "X")
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+        #expect(screen.snapshot.rows[0][2].contents == "🏽")
+        #expect(screen.snapshot.rows[0][2].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][3].isContinuation == true)
+        #expect(screen.snapshot.rows[0][4].contents == "X")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 5))
     }
 
     @Test
-    func zwjEmojiClusterUsesOneWideCell() throws {
-        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+    func zwjEmojiSequenceKeepsFollowingWideScalarInSeparateCellLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 1))
 
         try screen.apply(MoshTerminalOutput(bytes: Array("👩‍💻X".utf8)))
 
-        #expect(screen.snapshot.lineStrings == ["👩‍💻 X  "])
-        #expect(screen.snapshot.rows[0][0].contents == "👩‍💻")
+        #expect(screen.snapshot.lineStrings == ["👩‍ 💻 X "])
+        #expect(screen.snapshot.rows[0][0].contents == "👩‍")
         #expect(screen.snapshot.rows[0][0].displayWidth == 2)
         #expect(screen.snapshot.rows[0][1].isContinuation == true)
-        #expect(screen.snapshot.rows[0][2].contents == "X")
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+        #expect(screen.snapshot.rows[0][2].contents == "💻")
+        #expect(screen.snapshot.rows[0][2].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][3].isContinuation == true)
+        #expect(screen.snapshot.rows[0][4].contents == "X")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 5))
     }
 
     @Test
-    func zwjEmojiClusterPreservesDeferredWrap() throws {
-        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 2))
+    func emojiGraphemeOverwriteLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-EMOJI-GRAPHEME-OK"
+        let payload = "\u{1b}[2J\u{1b}[H"
+            + "👩‍💻\u{1b}[1;3HZ"
+            + "\u{1b}[2;1H👍🏽\u{1b}[2;3HZ"
+            + "\u{1b}[6;1H\(marker)"
 
-        try screen.apply(MoshTerminalOutput(bytes: Array("👩‍💻X".utf8)))
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
 
-        #expect(screen.snapshot.lineStrings == ["👩‍💻 ", "X "])
-        #expect(screen.snapshot.rows[0][0].contents == "👩‍💻")
+        #expect(screen.snapshot.lineStrings == [
+            "👩‍ Z" + String(repeating: " ", count: 37),
+            "👍 Z" + String(repeating: " ", count: 37),
+            String(repeating: " ", count: 40),
+            String(repeating: " ", count: 40),
+            String(repeating: " ", count: 40),
+            marker + String(repeating: " ", count: 40 - marker.count)
+        ])
+        #expect(screen.snapshot.rows[0][0].contents == "👩‍")
         #expect(screen.snapshot.rows[0][1].isContinuation == true)
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+        #expect(screen.snapshot.rows[0][2].contents == "Z")
+        #expect(screen.snapshot.rows[1][0].contents == "👍")
+        #expect(screen.snapshot.rows[1][1].isContinuation == true)
+        #expect(screen.snapshot.rows[1][2].contents == "Z")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
     }
 
     @Test

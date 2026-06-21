@@ -550,10 +550,6 @@ public struct MoshTerminalScreen: Sendable {
             return
         }
 
-        if self.appendGraphemeClusterContinuation(rawScalar, width: scalarWidth) {
-            return
-        }
-
         if self.autoWrapMode && self.wrapPending {
             self.index()
             self.cursor = MoshTerminalCursor(row: self.cursor.row, column: 0)
@@ -638,33 +634,6 @@ public struct MoshTerminalScreen: Sendable {
         } else {
             self.rows[target.row][column] = self.rows[target.row][column].appending(scalar)
         }
-    }
-
-    private mutating func appendGraphemeClusterContinuation(
-        _ scalar: Unicode.Scalar,
-        width: MoshTerminalScalarWidth
-    ) -> Bool {
-        guard width == .wide,
-              let position = self.activeGraphemeCellPosition(),
-              self.rows[position.row][position.column].contents.unicodeScalars.last?.value == 0x200d else {
-            return false
-        }
-
-        self.rows[position.row][position.column] = self.rows[position.row][position.column].appending(scalar)
-        return true
-    }
-
-    private func activeGraphemeCellPosition() -> MoshTerminalCursor? {
-        guard let target = self.activeGraphemeCursor,
-              self.rows.indices.contains(target.row),
-              self.rows[target.row].indices.contains(target.column) else {
-            return nil
-        }
-
-        return MoshTerminalCursor(
-            row: target.row,
-            column: self.leadingColumn(row: target.row, column: target.column)
-        )
     }
 
     private mutating func clearCellForWrite(row: Int, column: Int) {
