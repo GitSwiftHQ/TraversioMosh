@@ -914,6 +914,29 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func escapedC1LiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let fixture = "\u{1b}[2J\u{1b}[H"
+            + "I\u{1b}DX"
+            + "\u{1b}[2;10HN\u{1b}EY"
+            + "\u{1b}[4;5H\u{1b}H\u{1b}[4;1H\tT"
+            + "\u{1b}[6;10H\u{1b}MZ"
+            + "\u{1b}[6;1HTERMINAL-SCREEN-ESCAPED-C1-OK"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(fixture.utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "I                                       ",
+            " X       N                              ",
+            "Y                                       ",
+            "    T                                   ",
+            "         Z                              ",
+            "TERMINAL-SCREEN-ESCAPED-C1-OK           ",
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: 29))
+    }
+
+    @Test
     func appliesCarriageReturnLineFeedBackspaceAndTab() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 2))
 
