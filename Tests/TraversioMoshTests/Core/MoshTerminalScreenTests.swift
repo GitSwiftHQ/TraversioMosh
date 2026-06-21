@@ -89,6 +89,28 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func deleteControlLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-DELETE-CONTROL-OK"
+        let payload = "\u{1b}[2J\u{1b}[H"
+            + "\u{1b}[1;37Habcd\u{7f}X"
+            + "\u{1b}[3;1HA\u{7f}B"
+            + "\u{1b}[6;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            String(repeating: " ", count: 36) + "abcd",
+            "X" + String(repeating: " ", count: 39),
+            "AB" + String(repeating: " ", count: 38),
+            String(repeating: " ", count: 40),
+            String(repeating: " ", count: 40),
+            marker + String(repeating: " ", count: 40 - marker.count)
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func nullControlClearsPendingWrapLikeOfficialUnsupportedDispatch() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
