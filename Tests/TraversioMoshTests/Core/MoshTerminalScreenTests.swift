@@ -1636,6 +1636,25 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func oscTitleLimitLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-OSC-TITLE-LIMIT-OK"
+        let longTitle = String(repeating: "a", count: 300)
+        let expectedTitle = String(repeating: "a", count: 254)
+        let payload = "\u{1b}]2;\(longTitle)\u{07}"
+            + "\u{1b}[2J\u{1b}[5;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "")
+        #expect(screen.snapshot.windowTitle == expectedTitle)
+        #expect(screen.snapshot.lineStrings[4] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.count))
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
     func oscClipboardUpdatesSnapshotWithoutRendering() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
