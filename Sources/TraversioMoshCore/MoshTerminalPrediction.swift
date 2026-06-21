@@ -929,7 +929,9 @@ private struct PredictedCell: Equatable, Sendable {
             return
         }
 
-        row[self.column] = underlinePredictions
+        let shouldUnderline = underlinePredictions
+            && (replacement.isPredictionBlank == false || row[self.column].isPredictionBlank == false)
+        row[self.column] = shouldUnderline
             ? replacement.underlinedForPrediction()
             : replacement
     }
@@ -1034,7 +1036,7 @@ private extension MoshTerminalDimensions {
 
 private extension MoshTerminalCell {
     var isPredictionBlank: Bool {
-        self.contents == " "
+        self.contents.isEmpty || self.contents == " " || self.contents == "\u{00a0}"
     }
 
     func underlinedForPrediction() -> MoshTerminalCell {

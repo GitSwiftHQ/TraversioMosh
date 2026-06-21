@@ -77,4 +77,26 @@ struct MoshTerminalPredictionTests {
 
         #expect(prediction.projectedSnapshot(baseSnapshot: screen.snapshot).lineStrings == ["a     "])
     }
+
+    @Test
+    func delayedBlankPredictionDoesNotUnderlineAlreadyBlankCells() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        let screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        prediction.setLocalFrameSent(1)
+        prediction.registerUserInput(
+            [UInt8(ascii: "\r")],
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+        prediction.cull(baseSnapshot: screen.snapshot, nowMilliseconds: 5_000)
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["    "])
+        #expect(projected.rows[0].allSatisfy { $0.attributes.isUnderlined == false })
+    }
 }
