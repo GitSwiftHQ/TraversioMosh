@@ -1774,6 +1774,53 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func osc8RejectsDeletePayloadWithoutChangingCurrentHyperlink() throws {
+        let delete = "\u{7f}"
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+        let link = MoshTerminalHyperlink(parameters: "id=1", url: "https://example.test")
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    (
+                        "\u{1b}]8;id=1;https://example.test\u{1b}\\A"
+                            + "\u{1b}]8;id=2;https://example\(delete).test\u{1b}\\B"
+                            + "\u{1b}]8;;\u{1b}\\C"
+                    ).utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["ABC "])
+        #expect(screen.snapshot.rows[0][0].hyperlink == link)
+        #expect(screen.snapshot.rows[0][1].hyperlink == link)
+        #expect(screen.snapshot.rows[0][2].hyperlink == nil)
+        #expect(screen.snapshot.currentHyperlink == nil)
+    }
+
+    @Test
+    func osc8InvalidPayloadLiveFixtureMatchesOfficialScreenState() throws {
+        let delete = "\u{7f}"
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-HYPERLINK-INVALID-OK"
+        let link = MoshTerminalHyperlink(parameters: "id=live", url: "https://example.test")
+        let payload = "\u{1b}]8;id=live;https://example.test\u{1b}\\AB"
+            + "\u{1b}]8;id=bad;https://example\(delete).test\u{1b}\\CD"
+            + "\u{1b}]8;;\u{1b}\\ plain"
+            + "\u{1b}[5;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.lineStrings[0].hasPrefix("ABCD plain"))
+        #expect(screen.snapshot.rows[0][0].hyperlink == link)
+        #expect(screen.snapshot.rows[0][3].hyperlink == link)
+        #expect(screen.snapshot.rows[0][5].hyperlink == nil)
+        #expect(screen.snapshot.currentHyperlink == nil)
+        #expect(screen.snapshot.lineStrings[4] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.count))
+    }
+
+    @Test
     func resetClearsWindowTitleClipboardAndCurrentHyperlinkLikeOfficialFramebuffer() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
