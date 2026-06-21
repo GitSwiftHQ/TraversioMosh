@@ -154,6 +154,31 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func c1ControlsLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-C1-CONTROLS-OK"
+        let payload = "\u{1b}[2J\u{1b}[H"
+            + "\u{1b}[1;37Habcd\u{0084}X"
+            + "\u{1b}[3;10HN\u{0085}Y"
+            + "\u{1b}[5;20H\u{008d}R"
+            + "\u{1b}[5;5H\u{0088}"
+            + "\u{1b}[5;1HA\tB"
+            + "\u{1b}[6;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            String(repeating: " ", count: 36) + "abcd",
+            String(repeating: " ", count: 39) + "X",
+            String(repeating: " ", count: 9) + "N" + String(repeating: " ", count: 30),
+            "Y" + String(repeating: " ", count: 18) + "R" + String(repeating: " ", count: 20),
+            "A   B" + String(repeating: " ", count: 35),
+            marker + String(repeating: " ", count: 40 - marker.count)
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func cancelControlsInGroundClearPendingWrapLikeOfficialDispatch() throws {
         var canScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
         var subScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
