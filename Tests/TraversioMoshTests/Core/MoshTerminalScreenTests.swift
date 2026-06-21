@@ -341,6 +341,16 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func substituteControlInsideCSIClearsSequenceAndPendingWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[\u{001a}X".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["abX", "   "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func c1ControlInsideCSIReturnsToGroundAfterExecution() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
