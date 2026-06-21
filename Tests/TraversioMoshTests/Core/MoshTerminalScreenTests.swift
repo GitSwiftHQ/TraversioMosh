@@ -981,13 +981,32 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
-    func unregisteredNextAndPrecedingLineFinalsClearPendingWrapWithoutMoving() throws {
-        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+    func unregisteredCursorMovementFinalsClearPendingWrapWithoutMoving() throws {
+        let finals = [
+            UInt8(ascii: "E"),
+            UInt8(ascii: "F"),
+            UInt8(ascii: "a"),
+            UInt8(ascii: "e")
+        ]
 
-        try screen.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[EX\u{1b}[FY".utf8)))
+        for final in finals {
+            var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+            var bytes = Array("abcd\u{1b}[2".utf8)
+            bytes.append(final)
+            bytes.append(UInt8(ascii: "X"))
 
-        #expect(screen.snapshot.lineStrings == ["abcY", "    "])
-        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+            try screen.apply(MoshTerminalOutput(bytes: bytes))
+
+            let finalName = String(decoding: [final], as: UTF8.self)
+            #expect(
+                screen.snapshot.lineStrings == ["abcX", "    "],
+                "CSI \(finalName) must not move the cursor like CNL/CPL/HPR/VPR."
+            )
+            #expect(
+                screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3),
+                "CSI \(finalName) must only clear pending wrap before the next printable."
+            )
+        }
     }
 
     @Test
