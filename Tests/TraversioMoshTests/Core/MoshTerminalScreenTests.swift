@@ -549,6 +549,36 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func originModeSequencesClearPendingWrapThroughOfficialHome() throws {
+        var setModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
+        var resetModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
+
+        try setModeScreen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[2;3r\u{1b}[1;1Habc\u{1b}[?6hX".utf8)))
+        try resetModeScreen.apply(
+            MoshTerminalOutput(bytes: Array("\u{1b}[2;3r\u{1b}[?6h\u{1b}[1;1Habc\u{1b}[?6lX".utf8))
+        )
+
+        #expect(setModeScreen.snapshot.lineStrings == ["Xbc", "   ", "   ", "   "])
+        #expect(setModeScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+        #expect(resetModeScreen.snapshot.lineStrings == ["   ", "Xbc", "   ", "   "])
+        #expect(resetModeScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
+    func deccolmClearsPendingWrapThroughOfficialHome() throws {
+        var setModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+        var resetModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try setModeScreen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[?3hX".utf8)))
+        try resetModeScreen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[?3lX".utf8)))
+
+        #expect(setModeScreen.snapshot.lineStrings == ["X  ", "   "])
+        #expect(setModeScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+        #expect(resetModeScreen.snapshot.lineStrings == ["X  ", "   "])
+        #expect(resetModeScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
     func ansiModeSequencesClearPendingWrapLikeOfficialMosh() throws {
         var setModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
         var resetModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
