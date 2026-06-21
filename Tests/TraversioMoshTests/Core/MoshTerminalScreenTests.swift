@@ -1927,6 +1927,35 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func scrollRegionAutoscrollControlsLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-SCROLL-CONTROLS-OK"
+        let payload = "\u{1b}[2J\u{1b}[H"
+            + "TOP"
+            + "\u{1b}[2;1HAAA"
+            + "\u{1b}[3;1HBBB"
+            + "\u{1b}[4;1HCCC"
+            + "\u{1b}[5;1HDDD"
+            + "\u{1b}[2;5r"
+            + "\u{1b}[5;4H\n"
+            + "\u{1b}[2;4H\u{008d}R"
+            + "\u{1b}[r"
+            + "\u{1b}[6;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "TOP" + String(repeating: " ", count: 37),
+            "   R" + String(repeating: " ", count: 36),
+            "BBB" + String(repeating: " ", count: 37),
+            "CCC" + String(repeating: " ", count: 37),
+            "DDD" + String(repeating: " ", count: 37),
+            marker + String(repeating: " ", count: 40 - marker.count)
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func invalidScrollRegionClearsPendingWrapLikeOfficialDispatch() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
