@@ -554,17 +554,15 @@ struct MoshTerminalPredictionEngine: Sendable {
                 if column == baseSnapshot.dimensions.columnCount - 1 {
                     row.cells[column].unknown = true
                     row.cells[column].replacement = nil
-                } else if let previous = self.predictedCell(
-                    baseSnapshot: baseSnapshot,
-                    row: cursor.row,
-                    column: column - 1,
-                    overlayRow: row
-                ) {
-                    row.cells[column].unknown = false
-                    row.cells[column].replacement = previous
                 } else {
-                    row.cells[column].unknown = true
-                    row.cells[column].replacement = nil
+                    let previous = self.predictedCellSource(
+                        baseSnapshot: baseSnapshot,
+                        row: cursor.row,
+                        column: column - 1,
+                        overlayRow: row
+                    )
+                    row.cells[column].unknown = previous.isUnknown
+                    row.cells[column].replacement = previous.cell
                 }
             }
         }
@@ -645,15 +643,15 @@ struct MoshTerminalPredictionEngine: Sendable {
                     original: self.baseCell(baseSnapshot: baseSnapshot, row: cursor.row, column: column)
                 )
 
-                if column + 1 < baseSnapshot.dimensions.columnCount,
-                   let nextCell = self.predictedCell(
-                    baseSnapshot: baseSnapshot,
-                    row: cursor.row,
-                    column: column + 1,
-                    overlayRow: row
-                   ) {
-                    row.cells[column].unknown = false
-                    row.cells[column].replacement = nextCell
+                if column + 2 < baseSnapshot.dimensions.columnCount {
+                    let next = self.predictedCellSource(
+                        baseSnapshot: baseSnapshot,
+                        row: cursor.row,
+                        column: column + 1,
+                        overlayRow: row
+                    )
+                    row.cells[column].unknown = next.isUnknown
+                    row.cells[column].replacement = next.cell
                 } else {
                     row.cells[column].unknown = true
                     row.cells[column].replacement = nil
@@ -811,6 +809,32 @@ struct MoshTerminalPredictionEngine: Sendable {
         }
         return baseSnapshot.rows[rowNumber][column]
     }
+
+    private func predictedCellSource(
+        baseSnapshot: MoshTerminalScreenSnapshot,
+        row rowNumber: Int,
+        column: Int,
+        overlayRow: PredictedRow
+    ) -> (cell: MoshTerminalCell?, isUnknown: Bool) {
+        guard baseSnapshot.rows.indices.contains(rowNumber),
+              baseSnapshot.rows[rowNumber].indices.contains(column),
+              overlayRow.cells.indices.contains(column) else {
+            return (nil, true)
+        }
+
+        let predicted = overlayRow.cells[column]
+        if predicted.active {
+            if predicted.unknown {
+                return (nil, true)
+            }
+            guard let replacement = predicted.replacement else {
+                return (nil, true)
+            }
+            return (replacement, false)
+        }
+
+        return (baseSnapshot.rows[rowNumber][column], false)
+    }
 }
 
 private struct PredictedRow: Equatable, Sendable {
@@ -923,9 +947,18 @@ private struct PredictedCell: Equatable, Sendable {
     ) {
         guard self.active,
               self.tentative(confirmedEpoch: confirmedEpoch) == false,
-              row.indices.contains(self.column),
-              self.unknown == false,
-              let replacement else {
+              row.indices.contains(self.column) else {
+            return
+        }
+
+        if self.unknown {
+            if underlinePredictions, self.column != row.count - 1 {
+                row[self.column] = row[self.column].underlinedForPrediction()
+            }
+            return
+        }
+
+        guard let replacement else {
             return
         }
 

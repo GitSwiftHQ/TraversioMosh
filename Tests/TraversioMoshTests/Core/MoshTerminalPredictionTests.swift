@@ -99,4 +99,28 @@ struct MoshTerminalPredictionTests {
         #expect(projected.lineStrings == ["    "])
         #expect(projected.rows[0].allSatisfy { $0.attributes.isUnderlined == false })
     }
+
+    @Test
+    func unknownPredictionUnderlinesExistingCellExceptLastColumn() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;3H".utf8)))
+        prediction.setLocalFrameSent(1)
+        prediction.setSendIntervalMilliseconds(81)
+        prediction.registerUserInput(
+            [0x7f, 0x7f],
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+        prediction.cull(baseSnapshot: screen.snapshot, nowMilliseconds: 1)
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["CBCD"])
+        #expect(projected.rows[0].map { $0.attributes.isUnderlined } == [true, true, true, false])
+    }
 }
