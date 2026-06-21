@@ -1137,6 +1137,24 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func registeredRelativeCursorMovementClampsToViewportBounds() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 3))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("\u{1b}[2;3H\u{1b}[9A\u{1b}[9D\u{1b}[1B\u{1b}[2CX\u{1b}[9B\u{1b}[9CY".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == [
+            "     ",
+            "  X  ",
+            "    Y",
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 2, column: 4))
+    }
+
+    @Test
     func csiRelativeCursorMovementAndLineEraseMutateScreen() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
 
