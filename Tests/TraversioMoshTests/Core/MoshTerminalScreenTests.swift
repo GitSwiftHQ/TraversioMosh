@@ -1946,6 +1946,20 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func alternateScreenPrivateModesPreservePendingWrapLikeOfficialMosh() throws {
+        var setModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+        var resetModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+
+        try setModeScreen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[?47hX".utf8)))
+        try resetModeScreen.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[?1049lY".utf8)))
+
+        #expect(setModeScreen.snapshot.lineStrings == ["abc", "X  "])
+        #expect(setModeScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+        #expect(resetModeScreen.snapshot.lineStrings == ["abc", "Y  "])
+        #expect(resetModeScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func sgrAppliesStylesToNewCellsAndResetRestoresDefaults() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
