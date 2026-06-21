@@ -1680,6 +1680,26 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func oscDeletePayloadLiveFixtureMatchesOfficialScreenState() throws {
+        let delete = "\u{7f}"
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-OSC-DELETE-OK"
+        let payload = "\u{1b}]2;A\(delete)B\u{07}"
+            + "\u{1b}]52;c;A\(delete)B\u{07}"
+            + "\u{1b}[2J\u{1b}[5;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "")
+        #expect(screen.snapshot.windowTitle == "A\(delete)B")
+        #expect(screen.snapshot.clipboard == "A\(delete)B")
+        #expect(screen.snapshot.lineStrings[4] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.count))
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
     func osc8HyperlinkAppliesToPrintedCellsAndCanClear() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
         let link = MoshTerminalHyperlink(parameters: "id=1", url: "https://example.test")
