@@ -859,6 +859,22 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func decScreenAlignmentClearsCellHyperlinksWithoutClearingCurrentHyperlink() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(bytes: Array("\u{1b}]8;id=align;https://example.test\u{1b}\\\u{1b}#8X".utf8))
+        )
+
+        let link = MoshTerminalHyperlink(parameters: "id=align", url: "https://example.test")
+        #expect(screen.snapshot.lineStrings == ["XE"])
+        #expect(screen.snapshot.currentHyperlink == link)
+        #expect(screen.snapshot.rows[0][0].hyperlink == link)
+        #expect(screen.snapshot.rows[0][1].contents == "E")
+        #expect(screen.snapshot.rows[0][1].hyperlink == nil)
+    }
+
+    @Test
     func decScreenAlignmentCanBeSplitAcrossWrites() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 2))
 
