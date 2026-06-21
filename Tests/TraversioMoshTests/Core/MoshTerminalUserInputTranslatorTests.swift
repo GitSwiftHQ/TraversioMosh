@@ -20,6 +20,50 @@ struct MoshTerminalUserInputTranslatorTests {
     }
 
     @Test
+    func normalCursorModeTranslatesEveryOfficialSS3CursorFinal() {
+        var translator = MoshTerminalUserInputTranslator()
+
+        let translated = translator.translate(
+            [
+                0x1b, UInt8(ascii: "O"), UInt8(ascii: "A"),
+                0x1b, UInt8(ascii: "O"), UInt8(ascii: "B"),
+                0x1b, UInt8(ascii: "O"), UInt8(ascii: "C"),
+                0x1b, UInt8(ascii: "O"), UInt8(ascii: "D"),
+            ],
+            applicationCursorKeysEnabled: false
+        )
+
+        #expect(
+            translated == [
+                0x1b, UInt8(ascii: "["), UInt8(ascii: "A"),
+                0x1b, UInt8(ascii: "["), UInt8(ascii: "B"),
+                0x1b, UInt8(ascii: "["), UInt8(ascii: "C"),
+                0x1b, UInt8(ascii: "["), UInt8(ascii: "D"),
+            ]
+        )
+    }
+
+    @Test
+    func normalCursorModePreservesSS3FinalsOutsideOfficialCursorRange() {
+        var translator = MoshTerminalUserInputTranslator()
+
+        let translated = translator.translate(
+            [
+                0x1b, UInt8(ascii: "O"), UInt8(ascii: "@"),
+                0x1b, UInt8(ascii: "O"), UInt8(ascii: "E"),
+            ],
+            applicationCursorKeysEnabled: false
+        )
+
+        #expect(
+            translated == [
+                0x1b, UInt8(ascii: "O"), UInt8(ascii: "@"),
+                0x1b, UInt8(ascii: "O"), UInt8(ascii: "E"),
+            ]
+        )
+    }
+
+    @Test
     func applicationCursorModePreservesSS3CursorKeys() {
         var translator = MoshTerminalUserInputTranslator()
 
