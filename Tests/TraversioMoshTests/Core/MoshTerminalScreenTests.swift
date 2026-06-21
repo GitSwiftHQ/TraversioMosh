@@ -553,6 +553,12 @@ struct MoshTerminalScreenTests {
         try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?9h".utf8)))
         #expect(screen.snapshot.mouseReportingMode == .x10)
 
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1000h".utf8)))
+        #expect(screen.snapshot.mouseReportingMode == .vt220)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1001h".utf8)))
+        #expect(screen.snapshot.mouseReportingMode == .vt220Highlight)
+
         try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1002h".utf8)))
         #expect(screen.snapshot.mouseReportingMode == .buttonEvent)
 
@@ -561,6 +567,9 @@ struct MoshTerminalScreenTests {
 
         try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1003h".utf8)))
         #expect(screen.snapshot.mouseReportingMode == .anyEvent)
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1001l".utf8)))
+        #expect(screen.snapshot.mouseReportingMode == .none)
     }
 
     @Test
@@ -578,6 +587,32 @@ struct MoshTerminalScreenTests {
 
         try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?1006l".utf8)))
         #expect(screen.snapshot.mouseEncodingMode == .defaultMode)
+    }
+
+    @Test
+    func mouseModesLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-MOUSE-MODES-OK"
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    (
+                        "\u{1b}[2J\u{1b}[H"
+                            + "\u{1b}[?1001h"
+                            + "\u{1b}[?1015h"
+                            + "MOUSE"
+                            + "\u{1b}[5;1H\(marker)"
+                    ).utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings[0].hasPrefix("MOUSE"))
+        #expect(screen.snapshot.lineStrings[4] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.count))
+        #expect(screen.snapshot.mouseReportingMode == .vt220Highlight)
+        #expect(screen.snapshot.mouseEncodingMode == .urxvt)
     }
 
     @Test
