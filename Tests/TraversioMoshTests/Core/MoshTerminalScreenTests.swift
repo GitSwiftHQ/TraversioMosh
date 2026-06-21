@@ -1571,6 +1571,20 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func horizontalPositionAbsoluteBacktickMatchesCHALikeOfficialMosh() throws {
+        var hpaScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+        var chaScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try hpaScreen.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[2`X".utf8)))
+        try chaScreen.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[2GX".utf8)))
+
+        #expect(hpaScreen.snapshot.lineStrings == ["aXcd", "    "])
+        #expect(chaScreen.snapshot.lineStrings == ["aXcd", "    "])
+        #expect(hpaScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+        #expect(chaScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func disablingOriginModeRestoresViewportCursorPositioning() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
 
