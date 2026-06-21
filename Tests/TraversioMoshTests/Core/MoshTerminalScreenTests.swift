@@ -2438,6 +2438,44 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func sgrIgnoredAttributesLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-RENDITION-IGNORED-OK"
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    (
+                        "\u{1b}[2J\u{1b}[H"
+                            + "\u{1b}[2mA\u{1b}[9mB\u{1b}[1mC\u{1b}[29mD\u{1b}[22mE"
+                            + "\u{1b}[3;4;5;7;8mF\u{1b}[23;24;25;27;28mG\u{1b}[0m"
+                            + "\u{1b}[5;1H\(marker)"
+                    ).utf8
+                )
+            )
+        )
+
+        #expect(String(screen.snapshot.lineStrings[0].prefix(7)) == "ABCDEFG")
+        #expect(screen.snapshot.lineStrings[4].hasPrefix(marker))
+        #expect(screen.snapshot.rows[0][0].attributes == .default)
+        #expect(screen.snapshot.rows[0][1].attributes == .default)
+        #expect(screen.snapshot.rows[0][2].attributes == MoshTerminalTextAttributes(intensity: .bold))
+        #expect(screen.snapshot.rows[0][3].attributes == MoshTerminalTextAttributes(intensity: .bold))
+        #expect(screen.snapshot.rows[0][4].attributes == .default)
+        #expect(
+            screen.snapshot.rows[0][5].attributes == MoshTerminalTextAttributes(
+                isItalic: true,
+                isUnderlined: true,
+                isBlinking: true,
+                isInverse: true,
+                isInvisible: true
+            )
+        )
+        #expect(screen.snapshot.rows[0][6].attributes == .default)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.utf8.count))
+    }
+
+    @Test
     func sgrBlinkAndInvisibleFollowOfficialRenditionSetAndResetCodes() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
