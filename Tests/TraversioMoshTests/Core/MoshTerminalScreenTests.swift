@@ -1594,6 +1594,24 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func oscTitleLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-OSC-TITLE-OK"
+        let payload = "\u{1b}]1;Mosh Icon Title\u{07}"
+            + "\u{1b}]2;Mosh Window Title\u{07}"
+            + "\u{1b}[2J\u{1b}[5;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "Mosh Icon Title")
+        #expect(screen.snapshot.windowTitle == "Mosh Window Title")
+        #expect(screen.snapshot.lineStrings[4] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.count))
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
     func implicitOSCTitleCommandSetsIconAndWindowTitle() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
