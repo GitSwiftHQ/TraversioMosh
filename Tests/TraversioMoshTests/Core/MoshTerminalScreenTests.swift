@@ -1666,6 +1666,46 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func oscClipboardPayloadTruncatesAtOfficialCollectionLimit() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+        let maximumOSCPayloadScalars = 16 * 1024
+        let commandPrefix = "52;c;"
+        let clipboardPayload = String(repeating: "a", count: maximumOSCPayloadScalars + 64)
+        let expectedClipboard = String(
+            repeating: "a",
+            count: maximumOSCPayloadScalars - commandPrefix.count
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}]\(commandPrefix)\(clipboardPayload)\u{07}".utf8)))
+
+        #expect(screen.snapshot.clipboard == expectedClipboard)
+        #expect(screen.snapshot.lineStrings == ["    "])
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
+    func oscClipboardLimitLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let maximumOSCPayloadScalars = 16 * 1024
+        let marker = "TERMINAL-SCREEN-OSC-CLIPBOARD-LIMIT-OK"
+        let commandPrefix = "52;c;"
+        let clipboardPayload = String(repeating: "a", count: maximumOSCPayloadScalars + 64)
+        let expectedClipboard = String(
+            repeating: "a",
+            count: maximumOSCPayloadScalars - commandPrefix.count
+        )
+        let payload = "\u{1b}]\(commandPrefix)\(clipboardPayload)\u{07}"
+            + "\u{1b}[2J\u{1b}[5;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.clipboard == expectedClipboard)
+        #expect(screen.snapshot.lineStrings[4] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.count))
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
     func oscPayloadPreservesDeleteByteLikeOfficialMosh() throws {
         let delete = "\u{7f}"
         var titleScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
