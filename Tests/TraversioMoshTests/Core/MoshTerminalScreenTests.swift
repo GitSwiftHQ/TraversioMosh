@@ -2269,6 +2269,42 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func unicodeWidthLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-UNICODE-WIDTH-OK"
+        let payload = "\u{1b}[2J\u{1b}[H"
+            + "A中B"
+            + "\u{1b}[2;1He\u{0301}x"
+            + "\u{1b}[3;1H\u{0301}A"
+            + "\u{1b}[4;40H中X"
+            + "\u{1b}[6;1H\(marker)"
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(payload.utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == [
+            "A中 B" + String(repeating: " ", count: 36),
+            "e\u{0301}x" + String(repeating: " ", count: 38),
+            "\u{00a0}\u{0301}A" + String(repeating: " ", count: 38),
+            String(repeating: " ", count: 40),
+            "中 X" + String(repeating: " ", count: 37),
+            marker + String(repeating: " ", count: 40 - marker.count)
+        ])
+        #expect(screen.snapshot.rows[0][1].contents == "中")
+        #expect(screen.snapshot.rows[0][1].displayWidth == 2)
+        #expect(screen.snapshot.rows[0][2].isContinuation == true)
+        #expect(screen.snapshot.rows[1][0].contents == "e\u{0301}")
+        #expect(screen.snapshot.rows[2][0].contents == "\u{00a0}\u{0301}")
+        #expect(screen.snapshot.rows[4][0].contents == "中")
+        #expect(screen.snapshot.rows[4][0].displayWidth == 2)
+        #expect(screen.snapshot.rows[4][1].isContinuation == true)
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func printableISO88591FormatScalarsAreNarrowLikeOfficialMosh() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
