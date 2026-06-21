@@ -42,6 +42,7 @@ struct MoshTerminalPredictionEngine: Sendable {
     private static let glitchUnderlineThresholdMilliseconds: UInt64 = 5_000
 
     private var configuration: MoshPredictionConfiguration
+    private var inputParser: MoshTerminalInputParser
     private var parserState: ParserState
     private var overlayRows: [Int: PredictedRow]
     private var cursorPredictions: [PredictedCursor]
@@ -59,6 +60,7 @@ struct MoshTerminalPredictionEngine: Sendable {
 
     init(configuration: MoshPredictionConfiguration) {
         self.configuration = configuration
+        self.inputParser = MoshTerminalInputParser()
         self.parserState = .ground
         self.overlayRows = [:]
         self.cursorPredictions = []
@@ -105,9 +107,17 @@ struct MoshTerminalPredictionEngine: Sendable {
             return
         }
 
-        for byte in bytes {
-            self.registerUserByte(
-                byte,
+        let tokens: [MoshTerminalInputToken]
+        do {
+            tokens = try self.inputParser.parse(bytes)
+        } catch {
+            self.reset()
+            return
+        }
+
+        for token in tokens {
+            self.registerUserToken(
+                token,
                 baseSnapshot: baseSnapshot,
                 nowMilliseconds: nowMilliseconds
             )
@@ -334,6 +344,89 @@ struct MoshTerminalPredictionEngine: Sendable {
         }
     }
 
+    private mutating func registerUserToken(
+        _ token: MoshTerminalInputToken,
+        baseSnapshot: MoshTerminalScreenSnapshot,
+        nowMilliseconds: UInt64
+    ) {
+        switch token {
+        case .scalar(let scalar):
+            self.registerUserScalar(
+                scalar,
+                baseSnapshot: baseSnapshot,
+                nowMilliseconds: nowMilliseconds
+            )
+        case .control(let control):
+            if let byte = Self.byte(for: control) {
+                self.registerUserByte(
+                    byte,
+                    baseSnapshot: baseSnapshot,
+                    nowMilliseconds: nowMilliseconds
+                )
+            } else {
+                self.cull(baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+                self.parserState = .ground
+                self.becomeTentative()
+            }
+        }
+    }
+
+    private mutating func registerUserScalar(
+        _ scalar: Unicode.Scalar,
+        baseSnapshot: MoshTerminalScreenSnapshot,
+        nowMilliseconds: UInt64
+    ) {
+        if scalar.value < 0x80 {
+            self.registerUserByte(
+                UInt8(scalar.value),
+                baseSnapshot: baseSnapshot,
+                nowMilliseconds: nowMilliseconds
+            )
+            return
+        }
+
+        self.cull(baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+
+        guard self.parserState == .ground,
+              scalar.value >= 0x20,
+              MoshTerminalCharacterWidth.width(of: scalar) == .narrow else {
+            self.parserState = .ground
+            self.becomeTentative()
+            return
+        }
+
+        self.predictPrintableScalar(
+            scalar,
+            baseSnapshot: baseSnapshot,
+            nowMilliseconds: nowMilliseconds
+        )
+    }
+
+    private static func byte(for control: MoshTerminalControl) -> UInt8? {
+        switch control {
+        case .null:
+            return 0x00
+        case .bell:
+            return 0x07
+        case .backspace:
+            return 0x08
+        case .horizontalTab:
+            return 0x09
+        case .lineFeed:
+            return 0x0a
+        case .carriageReturn:
+            return 0x0d
+        case .escape:
+            return 0x1b
+        case .delete:
+            return 0x7f
+        case .c0(let byte):
+            return byte
+        case .c1:
+            return nil
+        }
+    }
+
     private mutating func registerGroundByte(
         _ byte: UInt8,
         baseSnapshot: MoshTerminalScreenSnapshot,
@@ -346,7 +439,11 @@ struct MoshTerminalPredictionEngine: Sendable {
             self.becomeTentative()
             self.predictCarriageReturnLineFeed(baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         case 0x20...0x7e:
-            self.predictPrintableASCII(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+            self.predictPrintableScalar(
+                Unicode.Scalar(byte),
+                baseSnapshot: baseSnapshot,
+                nowMilliseconds: nowMilliseconds
+            )
         case 0x7f:
             self.predictBackspace(baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         default:
@@ -420,11 +517,16 @@ struct MoshTerminalPredictionEngine: Sendable {
         }
     }
 
-    private mutating func predictPrintableASCII(
-        _ byte: UInt8,
+    private mutating func predictPrintableScalar(
+        _ scalar: Unicode.Scalar,
         baseSnapshot: MoshTerminalScreenSnapshot,
         nowMilliseconds: UInt64
     ) {
+        guard MoshTerminalCharacterWidth.width(of: scalar) == .narrow else {
+            self.becomeTentative()
+            return
+        }
+
         self.initializeCursor(baseSnapshot: baseSnapshot)
         guard var cursor = self.cursorPredictions.last else {
             return
@@ -486,7 +588,7 @@ struct MoshTerminalPredictionEngine: Sendable {
         )
         row.cells[cursor.column].unknown = false
         row.cells[cursor.column].replacement = MoshTerminalCell(
-            contents: String(Unicode.Scalar(byte)),
+            contents: String(scalar),
             attributes: attributes,
             hyperlink: nil
         )
@@ -671,6 +773,7 @@ struct MoshTerminalPredictionEngine: Sendable {
     private mutating func reset() {
         self.overlayRows.removeAll(keepingCapacity: true)
         self.cursorPredictions.removeAll(keepingCapacity: true)
+        self.inputParser = MoshTerminalInputParser()
         self.parserState = .ground
         self.becomeTentative()
     }

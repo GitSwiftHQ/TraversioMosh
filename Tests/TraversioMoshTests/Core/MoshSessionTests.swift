@@ -686,7 +686,7 @@ struct MoshSessionTests {
             try await fixture.session.start()
 
             let waitMilliseconds = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(waitMilliseconds == 25)
 
@@ -732,7 +732,7 @@ struct MoshSessionTests {
             try await fixture.session.start()
 
             let heartbeatWait = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(heartbeatWait == 1_000)
 
@@ -747,7 +747,7 @@ struct MoshSessionTests {
             #expect(hostOperations == [hostOperation])
 
             let delayedAckWait = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(delayedAckWait == 100)
 
@@ -792,14 +792,14 @@ struct MoshSessionTests {
             try await fixture.session.start()
 
             let initialWait = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(initialWait == 20)
             await fixture.clock.advance(byMilliseconds: initialWait)
             await fixture.timer.resumeNextSleep()
 
             let postInitialWait = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(postInitialWait == 1_000)
 
@@ -814,21 +814,21 @@ struct MoshSessionTests {
             #expect(hostOperations == [hostOperation])
 
             let delayedAckWait = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(delayedAckWait == 100)
 
             try await fixture.session.sendKeystrokes([0x61])
 
             let keystrokeWait = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(keystrokeWait == 20)
             await fixture.clock.advance(byMilliseconds: keystrokeWait)
             await fixture.timer.resumeNextSleep()
 
             let activeRetryWait = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(activeRetryWait == 150)
             await fixture.clock.advance(byMilliseconds: activeRetryWait)
@@ -875,7 +875,7 @@ struct MoshSessionTests {
             try await fixture.session.start()
 
             let waitMilliseconds = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(waitMilliseconds == 25)
 
@@ -916,7 +916,7 @@ struct MoshSessionTests {
             try await fixture.session.start()
 
             let initialSendWait = try await withSessionTimeout {
-                await fixture.timer.nextSleepRequest()
+                try await fixture.timer.nextSleepRequest()
             }
             #expect(initialSendWait == 20)
             await fixture.clock.advance(byMilliseconds: initialSendWait)
@@ -1001,12 +1001,14 @@ private actor ManualMillisecondsClock: MoshMillisecondsClock {
 
 private actor ManualSessionTimer: MoshSessionTimer {
     private var nextSleepID = 0
+    private var nextSleepRequestWaiterID = 0
     private var pendingSleepOrder: [Int] = []
     private var pendingSleepMilliseconds: [Int: UInt64] = [:]
     private var pendingSleepContinuations: [Int: CheckedContinuation<Void, Error>] = [:]
     private var cancelledSleepIDs: Set<Int> = []
     private var sleepRequests: [UInt64] = []
-    private var sleepRequestWaiters: [CheckedContinuation<UInt64, Never>] = []
+    private var sleepRequestWaiters: [(id: Int, continuation: CheckedContinuation<UInt64, Error>)] = []
+    private var cancelledSleepRequestWaiterIDs: Set<Int> = []
 
     func sleep(forMilliseconds milliseconds: UInt64) async throws {
         let sleepID = self.nextSleepID
@@ -1027,13 +1029,22 @@ private actor ManualSessionTimer: MoshSessionTimer {
         }
     }
 
-    func nextSleepRequest() async -> UInt64 {
+    func nextSleepRequest() async throws -> UInt64 {
         if self.sleepRequests.isEmpty == false {
             return self.sleepRequests.removeFirst()
         }
 
-        return await withCheckedContinuation { continuation in
-            self.sleepRequestWaiters.append(continuation)
+        let waiterID = self.nextSleepRequestWaiterID
+        self.nextSleepRequestWaiterID += 1
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                self.storeSleepRequestWaiter(id: waiterID, continuation: continuation)
+            }
+        } onCancel: {
+            Task {
+                await self.cancelSleepRequestWaiter(id: waiterID)
+            }
         }
     }
 
@@ -1090,9 +1101,36 @@ private actor ManualSessionTimer: MoshSessionTimer {
         }
     }
 
+    private func storeSleepRequestWaiter(
+        id: Int,
+        continuation: CheckedContinuation<UInt64, Error>
+    ) {
+        if self.sleepRequests.isEmpty == false {
+            continuation.resume(returning: self.sleepRequests.removeFirst())
+            return
+        }
+
+        if self.cancelledSleepRequestWaiterIDs.remove(id) != nil {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+
+        self.sleepRequestWaiters.append((id: id, continuation: continuation))
+    }
+
+    private func cancelSleepRequestWaiter(id: Int) {
+        guard let index = self.sleepRequestWaiters.firstIndex(where: { $0.id == id }) else {
+            self.cancelledSleepRequestWaiterIDs.insert(id)
+            return
+        }
+
+        let waiter = self.sleepRequestWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
     private func publishSleepRequest(_ milliseconds: UInt64) {
         if self.sleepRequestWaiters.isEmpty == false {
-            self.sleepRequestWaiters.removeFirst().resume(returning: milliseconds)
+            self.sleepRequestWaiters.removeFirst().continuation.resume(returning: milliseconds)
             return
         }
 
@@ -1291,7 +1329,7 @@ private func nextSleepRequest(
 ) async throws -> UInt64 {
     try await withSessionTimeout {
         while true {
-            let milliseconds = await timer.nextSleepRequest()
+            let milliseconds = try await timer.nextSleepRequest()
             if milliseconds == expectedMilliseconds {
                 return milliseconds
             }
