@@ -288,6 +288,7 @@ struct MoshSessionTests {
             rows: 1,
             predictionConfiguration: MoshPredictionConfiguration(displayPreference: .always)
         )
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
         let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
 
         do {
@@ -297,6 +298,17 @@ struct MoshSessionTests {
             try await fixture.session.sendKeystrokes(Array("a".utf8))
 
             #expect(await fixture.session.screenSnapshot.lineStrings == ["    "])
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let serverState = try #require(serverInstructions.last).instructionResult.latestState.state
+            #expect(
+                serverState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 4, rows: 1)),
+                    .keystrokes(Array("a".utf8)),
+                ]
+            )
 
             var hostState = MoshTerminalHostState()
             hostState.append(.write(MoshTerminalOutput(bytes: Array("a".utf8))))
@@ -320,6 +332,7 @@ struct MoshSessionTests {
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
         } catch {
+            serverInstructionTask.cancel()
             hostOperationTask.cancel()
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
@@ -334,6 +347,7 @@ struct MoshSessionTests {
             rows: 1,
             predictionConfiguration: MoshPredictionConfiguration(displayPreference: .adaptive)
         )
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
         let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
 
         do {
@@ -343,6 +357,17 @@ struct MoshSessionTests {
             try await fixture.session.sendKeystrokes(Array("a".utf8))
 
             #expect(await fixture.session.screenSnapshot.lineStrings == ["    "])
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let serverState = try #require(serverInstructions.last).instructionResult.latestState.state
+            #expect(
+                serverState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 4, rows: 1)),
+                    .keystrokes(Array("a".utf8)),
+                ]
+            )
 
             var hostState = MoshTerminalHostState()
             hostState.append(.write(MoshTerminalOutput(bytes: Array("a".utf8))))
@@ -374,6 +399,7 @@ struct MoshSessionTests {
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
         } catch {
+            serverInstructionTask.cancel()
             hostOperationTask.cancel()
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
@@ -388,6 +414,7 @@ struct MoshSessionTests {
             rows: 1,
             predictionConfiguration: MoshPredictionConfiguration(displayPreference: .never)
         )
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
         let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
 
         do {
@@ -395,6 +422,17 @@ struct MoshSessionTests {
             try await fixture.session.start()
 
             try await fixture.session.sendKeystrokes(Array("a".utf8))
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let serverState = try #require(serverInstructions.last).instructionResult.latestState.state
+            #expect(
+                serverState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 4, rows: 1)),
+                    .keystrokes(Array("a".utf8)),
+                ]
+            )
 
             var hostState = MoshTerminalHostState()
             hostState.append(.write(MoshTerminalOutput(bytes: Array("a".utf8))))
@@ -413,6 +451,7 @@ struct MoshSessionTests {
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
         } catch {
+            serverInstructionTask.cancel()
             hostOperationTask.cancel()
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
@@ -427,6 +466,7 @@ struct MoshSessionTests {
             rows: 1,
             predictionConfiguration: MoshPredictionConfiguration(displayPreference: .always)
         )
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 2)
         let hostOperationTask = collectHostOperations(from: fixture.session, count: 2)
 
         do {
@@ -434,6 +474,17 @@ struct MoshSessionTests {
             try await fixture.session.start()
 
             try await fixture.session.sendKeystrokes(Array("a".utf8))
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let serverState = try #require(serverInstructions.last).instructionResult.latestState.state
+            #expect(
+                serverState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 4, rows: 1)),
+                    .keystrokes(Array("a".utf8)),
+                ]
+            )
 
             var hostState = MoshTerminalHostState()
             hostState.append(.write(MoshTerminalOutput(bytes: Array("a".utf8))))
@@ -453,6 +504,7 @@ struct MoshSessionTests {
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
         } catch {
+            serverInstructionTask.cancel()
             hostOperationTask.cancel()
             await fixture.session.stop()
             await fixture.serverRuntime.stop()

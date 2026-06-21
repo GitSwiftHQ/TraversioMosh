@@ -270,6 +270,7 @@ public actor MoshSession {
             throw MoshSessionError.notStarted
         }
 
+        self.cancelMaintenanceTask()
         do {
             await runtime.startShutdown()
             _ = try await self.sendDueDatagrams()
@@ -338,6 +339,7 @@ public actor MoshSession {
             throw MoshSessionError.notStarted
         }
 
+        self.cancelMaintenanceTask()
         self.terminalEngine.enqueueClientOperation(operation)
         await runtime.setCurrentState(self.terminalEngine.clientState)
         _ = try await self.sendDueDatagrams()
@@ -538,8 +540,7 @@ public actor MoshSession {
     private func restartMaintenanceTask(
         runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
     ) {
-        self.maintenanceTask?.cancel()
-        self.maintenanceGeneration &+= 1
+        self.cancelMaintenanceTask()
         let generation = self.maintenanceGeneration
         self.maintenanceTask = Task { [weak self] in
             guard let self else {
@@ -576,6 +577,9 @@ public actor MoshSession {
 
                 let sentDatagram = try await self.sendDueDatagrams()
                 if sentDatagram == false, waitMilliseconds == 0 {
+                    guard self.shouldContinueMaintenance(generation: generation) else {
+                        return
+                    }
                     throw MoshSessionError.timerExpiredWithoutDueDatagram
                 }
                 if await runtime.shutdownTimedOut() {
@@ -595,6 +599,12 @@ public actor MoshSession {
 
     private func shouldContinueMaintenance(generation: UInt64) -> Bool {
         self.isStarted && self.isStopped == false && self.maintenanceGeneration == generation
+    }
+
+    private func cancelMaintenanceTask() {
+        self.maintenanceGeneration &+= 1
+        self.maintenanceTask?.cancel()
+        self.maintenanceTask = nil
     }
 
     private func waitUntilStopped() async throws {
