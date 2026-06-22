@@ -2518,6 +2518,16 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func topOverflowScrollRegionIsIgnoredLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("1111222233334444\u{1b}[2;3r\u{1b}[3;1H\u{1b}[9;10r\nX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["1111", "3333", "X   ", "4444"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 2, column: 1))
+    }
+
+    @Test
     func originModePositionsCursorRelativeToScrollRegion() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 5))
 
