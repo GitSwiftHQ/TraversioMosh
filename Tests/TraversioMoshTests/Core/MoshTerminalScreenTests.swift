@@ -1401,6 +1401,17 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func privateDeviceStatusReportDoesNotReplyButClearsPendingWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        let replies = try screen.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[?6nX".utf8)))
+
+        #expect(replies.isEmpty)
+        #expect(screen.snapshot.lineStrings == ["abcX", "    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+    }
+
+    @Test
     func unregisteredRelativeHorizontalAndVerticalFinalsDoNotMoveCursor() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 3))
 
