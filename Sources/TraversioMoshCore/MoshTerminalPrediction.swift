@@ -351,6 +351,9 @@ struct MoshTerminalPredictionEngine: Sendable {
                 self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
                 return
             }
+            if byte == 0x7f {
+                return
+            }
             self.parserState = .ground
             self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         }
@@ -489,6 +492,8 @@ struct MoshTerminalPredictionEngine: Sendable {
             self.parserState = .escape
         case _ where Self.isPredictionC0Prime(byte):
             self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+        case 0x7f:
+            return
         case UInt8(ascii: "O"):
             self.parserState = .ss3
         case UInt8(ascii: "["):
@@ -511,6 +516,10 @@ struct MoshTerminalPredictionEngine: Sendable {
 
         if Self.isPredictionC0Prime(byte) {
             self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+            return
+        }
+
+        if byte == 0x7f {
             return
         }
 

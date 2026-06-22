@@ -272,4 +272,67 @@ struct MoshTerminalPredictionTests {
         #expect(projected.lineStrings == ["ABCD"])
         #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 2))
     }
+
+    @Test
+    func deleteInsideCSIPreservesPredictionParserStateLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;2H".utf8)))
+        prediction.registerUserInput(
+            [0x1b, UInt8(ascii: "["), 0x7f, UInt8(ascii: "C")],
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ABCD"])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func deleteInsideEscapePreservesPredictionParserStateLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;2H".utf8)))
+        prediction.registerUserInput(
+            [0x1b, 0x7f, UInt8(ascii: "["), UInt8(ascii: "C")],
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ABCD"])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
+    func deleteInsideSS3CursorSequencePreservesPredictionParserStateLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;2H".utf8)))
+        prediction.registerUserInput(
+            [0x1b, UInt8(ascii: "O"), 0x7f, UInt8(ascii: "C")],
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ABCD"])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
 }
