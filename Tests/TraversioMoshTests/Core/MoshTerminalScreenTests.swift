@@ -590,6 +590,44 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func multiParameterModeSequencesFollowOfficialOrder() throws {
+        var privateModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
+
+        try privateModeScreen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    "\u{1b}[?5;25;2004;1000;1003;1001;1005;1006;1015h".utf8
+                )
+            )
+        )
+
+        #expect(privateModeScreen.snapshot.isReverseVideoEnabled == true)
+        #expect(privateModeScreen.snapshot.isCursorVisible == true)
+        #expect(privateModeScreen.snapshot.isBracketedPasteEnabled == true)
+        #expect(privateModeScreen.snapshot.mouseReportingMode == .vt220Highlight)
+        #expect(privateModeScreen.snapshot.mouseEncodingMode == .urxvt)
+
+        try privateModeScreen.apply(
+            MoshTerminalOutput(bytes: Array("\u{1b}[?5;2004;1001;1015l".utf8))
+        )
+
+        #expect(privateModeScreen.snapshot.isReverseVideoEnabled == false)
+        #expect(privateModeScreen.snapshot.isCursorVisible == true)
+        #expect(privateModeScreen.snapshot.isBracketedPasteEnabled == false)
+        #expect(privateModeScreen.snapshot.mouseReportingMode == .none)
+        #expect(privateModeScreen.snapshot.mouseEncodingMode == .defaultMode)
+
+        var ansiModeScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+
+        try ansiModeScreen.apply(
+            MoshTerminalOutput(bytes: Array("abcd\u{1b}[1;1H\u{1b}[999;4hX\u{1b}[999;4lY".utf8))
+        )
+
+        #expect(ansiModeScreen.snapshot.lineStrings == ["XYbcd"])
+        #expect(ansiModeScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func mouseModesLiveFixtureMatchesOfficialScreenState() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
         let marker = "TERMINAL-SCREEN-MOUSE-MODES-OK"
@@ -599,8 +637,8 @@ struct MoshTerminalScreenTests {
                 bytes: Array(
                     (
                         "\u{1b}[2J\u{1b}[H"
-                            + "\u{1b}[?1001h"
-                            + "\u{1b}[?1015h"
+                            + "\u{1b}[?1000;1003;1001h"
+                            + "\u{1b}[?1005;1006;1015h"
                             + "MOUSE"
                             + "\u{1b}[5;1H\(marker)"
                     ).utf8
