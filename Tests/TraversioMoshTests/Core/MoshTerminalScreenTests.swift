@@ -111,6 +111,39 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func deleteInActiveParserStatesIsIgnoredLikeOfficialParser() throws {
+        var escapeEntry = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+        try escapeEntry.apply(MoshTerminalOutput(bytes: Array("AB\u{1b}\u{7f}DX".utf8)))
+        #expect(escapeEntry.snapshot.lineStrings == ["AB  ", "  X "])
+        #expect(escapeEntry.snapshot.cursor == MoshTerminalCursor(row: 1, column: 3))
+
+        var escapeIntermediate = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
+        try escapeIntermediate.apply(MoshTerminalOutput(bytes: Array("A\u{1b}#\u{7f}8X".utf8)))
+        #expect(escapeIntermediate.snapshot.lineStrings == ["EXE", "EEE"])
+        #expect(escapeIntermediate.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+
+        var csiEntry = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+        try csiEntry.apply(MoshTerminalOutput(bytes: Array("A\u{1b}[\u{7f}2CX".utf8)))
+        #expect(csiEntry.snapshot.lineStrings == ["A  X "])
+        #expect(csiEntry.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+
+        var csiParameter = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+        try csiParameter.apply(MoshTerminalOutput(bytes: Array("A\u{1b}[2\u{7f}CX".utf8)))
+        #expect(csiParameter.snapshot.lineStrings == ["A  X "])
+        #expect(csiParameter.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+
+        var csiIntermediate = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+        try csiIntermediate.apply(MoshTerminalOutput(bytes: Array("\u{1b}[?25l\u{1b}[!\u{7f}pX".utf8)))
+        #expect(csiIntermediate.snapshot.lineStrings == ["X   "])
+        #expect(csiIntermediate.snapshot.isCursorVisible == true)
+
+        var csiIgnore = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+        try csiIgnore.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[1:\u{7f}CX".utf8)))
+        #expect(csiIgnore.snapshot.lineStrings == ["abcd", "X   "])
+        #expect(csiIgnore.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func nullControlClearsPendingWrapLikeOfficialUnsupportedDispatch() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
