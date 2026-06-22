@@ -2447,23 +2447,29 @@ struct MoshTerminalScreenTests {
                 bytes: Array(
                     (
                         "\u{1b}[2J\u{1b}[H"
-                            + "\u{1b}[2mA\u{1b}[9mB\u{1b}[1mC\u{1b}[29mD\u{1b}[22mE"
-                            + "\u{1b}[3;4;5;7;8mF\u{1b}[23;24;25;27;28mG\u{1b}[0m"
+                            + "\u{1b}[2mA\u{1b}[6mB\u{1b}[9mC"
+                            + "\u{1b}[1mD\u{1b}[21mE\u{1b}[29mF\u{1b}[22mG"
+                            + "\u{1b}[53mH\u{1b}[55mI"
+                            + "\u{1b}[3;4;5;7;8mJ\u{1b}[23;24;25;27;28mK\u{1b}[0m"
                             + "\u{1b}[5;1H\(marker)"
                     ).utf8
                 )
             )
         )
 
-        #expect(String(screen.snapshot.lineStrings[0].prefix(7)) == "ABCDEFG")
+        #expect(String(screen.snapshot.lineStrings[0].prefix(11)) == "ABCDEFGHIJK")
         #expect(screen.snapshot.lineStrings[4].hasPrefix(marker))
         #expect(screen.snapshot.rows[0][0].attributes == .default)
         #expect(screen.snapshot.rows[0][1].attributes == .default)
-        #expect(screen.snapshot.rows[0][2].attributes == MoshTerminalTextAttributes(intensity: .bold))
+        #expect(screen.snapshot.rows[0][2].attributes == .default)
         #expect(screen.snapshot.rows[0][3].attributes == MoshTerminalTextAttributes(intensity: .bold))
-        #expect(screen.snapshot.rows[0][4].attributes == .default)
+        #expect(screen.snapshot.rows[0][4].attributes == MoshTerminalTextAttributes(intensity: .bold))
+        #expect(screen.snapshot.rows[0][5].attributes == MoshTerminalTextAttributes(intensity: .bold))
+        #expect(screen.snapshot.rows[0][6].attributes == .default)
+        #expect(screen.snapshot.rows[0][7].attributes == .default)
+        #expect(screen.snapshot.rows[0][8].attributes == .default)
         #expect(
-            screen.snapshot.rows[0][5].attributes == MoshTerminalTextAttributes(
+            screen.snapshot.rows[0][9].attributes == MoshTerminalTextAttributes(
                 isItalic: true,
                 isUnderlined: true,
                 isBlinking: true,
@@ -2471,7 +2477,7 @@ struct MoshTerminalScreenTests {
                 isInvisible: true
             )
         )
-        #expect(screen.snapshot.rows[0][6].attributes == .default)
+        #expect(screen.snapshot.rows[0][10].attributes == .default)
         #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.utf8.count))
     }
 
