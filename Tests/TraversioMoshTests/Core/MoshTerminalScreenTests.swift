@@ -1828,6 +1828,25 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func unsupportedOSCTitleCommandsDoNotChangeSnapshotMetadata() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-OSC-UNSUPPORTED-OK"
+        let payload = "\u{1b}]0;Original Title\u{07}"
+            + "\u{1b}]3;Ignored Single\u{07}"
+            + "\u{1b}]10;Ignored Multi\u{07}"
+            + "\u{1b}[2J\u{1b}[5;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "Original Title")
+        #expect(screen.snapshot.windowTitle == "Original Title")
+        #expect(screen.snapshot.lineStrings[4] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.count))
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
     func oscTitleTruncatesToOfficialLimit() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
         let longTitle = String(repeating: "a", count: 300)
