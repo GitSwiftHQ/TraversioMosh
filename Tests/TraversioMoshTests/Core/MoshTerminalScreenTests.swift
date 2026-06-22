@@ -1879,6 +1879,31 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func oscHighUnicodePayloadPreservesMetadataLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    (
+                        "A"
+                            + "\u{1b}]0;Mosh \u{00a9} Title\u{07}"
+                            + "\u{1b}]52;c;Clip \u{4f60}\u{07}"
+                            + "B"
+                    ).utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "Mosh \u{00a9} Title")
+        #expect(screen.snapshot.windowTitle == "Mosh \u{00a9} Title")
+        #expect(screen.snapshot.clipboard == "Clip \u{4f60}")
+        #expect(screen.snapshot.lineStrings == ["AB      "])
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
     func oscTitleLiveFixtureMatchesOfficialScreenState() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
         let marker = "TERMINAL-SCREEN-OSC-TITLE-OK"
