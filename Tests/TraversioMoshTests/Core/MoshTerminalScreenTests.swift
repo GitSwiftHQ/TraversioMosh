@@ -1448,6 +1448,19 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func deviceAttributeQueriesIgnoreNumericParametersLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        let replies = try screen.apply(
+            MoshTerminalOutput(bytes: Array("\u{1b}[1c\u{1b}[>0c".utf8))
+        )
+
+        #expect(replies == Array("\u{1b}[?62c\u{1b}[>1;10;0c".utf8))
+        #expect(screen.snapshot.lineStrings == ["    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 0))
+    }
+
+    @Test
     func privateDeviceAttributeQueriesDoNotReturnReplies() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
