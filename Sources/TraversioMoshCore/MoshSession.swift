@@ -232,15 +232,20 @@ public actor MoshSession {
             clock: self.configuration.clock
         )
 
-        try await runtime.start()
-        await runtime.setCurrentState(self.terminalEngine.clientState)
+        do {
+            try await runtime.start()
+            await runtime.setCurrentState(self.terminalEngine.clientState)
 
-        self.runtime = runtime
-        self.isStarted = true
-        self.startReceiveTask(runtime: runtime)
-        self.diagnosticEventContinuation.yield(.started(self.configuration.endpoint))
-        _ = try await self.sendDueDatagrams()
-        self.restartMaintenanceTask(runtime: runtime)
+            self.runtime = runtime
+            self.isStarted = true
+            self.startReceiveTask(runtime: runtime)
+            self.diagnosticEventContinuation.yield(.started(self.configuration.endpoint))
+            _ = try await self.sendDueDatagrams()
+            self.restartMaintenanceTask(runtime: runtime)
+        } catch {
+            await self.finishFromStartFailure(runtime: runtime, throwing: error)
+            throw error
+        }
     }
 
     public func stop() async {
@@ -435,6 +440,30 @@ public actor MoshSession {
             self.hostOperationContinuation.finish()
             self.renderOperationContinuation.finish()
         }
+        self.finishStopWaiters(throwing: error)
+        self.diagnosticEventContinuation.yield(.stopped)
+        self.diagnosticEventContinuation.finish()
+    }
+
+    private func finishFromStartFailure(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>,
+        throwing error: Error
+    ) async {
+        guard self.isStopped == false else {
+            return
+        }
+
+        self.isStopped = true
+        self.isStarted = false
+        self.maintenanceGeneration &+= 1
+        self.receiveTask?.cancel()
+        self.receiveTask = nil
+        self.maintenanceTask?.cancel()
+        self.maintenanceTask = nil
+        await runtime.stop()
+        self.runtime = nil
+        self.hostOperationContinuation.finish(throwing: error)
+        self.renderOperationContinuation.finish(throwing: error)
         self.finishStopWaiters(throwing: error)
         self.diagnosticEventContinuation.yield(.stopped)
         self.diagnosticEventContinuation.finish()
