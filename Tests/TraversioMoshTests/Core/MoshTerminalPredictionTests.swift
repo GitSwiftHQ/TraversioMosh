@@ -101,6 +101,37 @@ struct MoshTerminalPredictionTests {
     }
 
     @Test
+    func bottomRowBlankPredictionClearsReplacementRenditionsLikeOfficialMosh() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[41mABC".utf8)))
+        prediction.setLocalFrameSent(1)
+        prediction.registerUserInput(
+            [UInt8(ascii: "\r")],
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+        prediction.cull(baseSnapshot: screen.snapshot, nowMilliseconds: 1)
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+        let projectedAttributes = projected.rows[0].map(\.attributes)
+        var underlinedPredictionAttributes = MoshTerminalTextAttributes.default
+        underlinedPredictionAttributes.isUnderlined = true
+
+        #expect(projected.lineStrings == ["    "])
+        #expect(projectedAttributes == [
+            underlinedPredictionAttributes,
+            underlinedPredictionAttributes,
+            underlinedPredictionAttributes,
+            .default
+        ])
+    }
+
+    @Test
     func unknownPredictionUnderlinesExistingCellExceptLastColumn() throws {
         let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
         var screen = MoshTerminalScreen(dimensions: dimensions)

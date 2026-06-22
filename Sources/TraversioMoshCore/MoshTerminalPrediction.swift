@@ -693,16 +693,11 @@ struct MoshTerminalPredictionEngine: Sendable {
         let rowNumber = baseSnapshot.dimensions.rowCount - 1
         var row = self.row(for: rowNumber, columnCount: baseSnapshot.dimensions.columnCount)
         for column in 0..<baseSnapshot.dimensions.columnCount {
-            row.preparePrediction(
+            row.prepareBlankPredictionClearingReplacement(
                 at: column,
                 frame: self.predictionExpirationFrame,
                 epoch: self.predictionEpoch,
-                nowMilliseconds: nowMilliseconds,
-                original: self.baseCell(baseSnapshot: baseSnapshot, row: rowNumber, column: column)
-            )
-            row.cells[column].unknown = false
-            row.cells[column].replacement = .blank(
-                attributes: baseSnapshot.rows[rowNumber][column].attributes
+                nowMilliseconds: nowMilliseconds
             )
         }
         self.overlayRows[rowNumber] = row
@@ -868,6 +863,26 @@ private struct PredictedRow: Equatable, Sendable {
         self.cells[column].tentativeUntilEpoch = epoch
         self.cells[column].expire(frame: frame, nowMilliseconds: nowMilliseconds)
         self.cells[column].originalContents.append(original)
+    }
+
+    mutating func prepareBlankPredictionClearingReplacement(
+        at column: Int,
+        frame: UInt64,
+        epoch: UInt64,
+        nowMilliseconds: UInt64
+    ) {
+        guard self.cells.indices.contains(column) else {
+            return
+        }
+
+        let replacement = self.cells[column].replacement ?? .blank
+        self.cells[column].active = true
+        self.cells[column].tentativeUntilEpoch = epoch
+        self.cells[column].expire(frame: frame, nowMilliseconds: nowMilliseconds)
+        self.cells[column].replacement = .blank(
+            attributes: replacement.attributes,
+            hyperlink: replacement.hyperlink
+        )
     }
 
     func apply(
