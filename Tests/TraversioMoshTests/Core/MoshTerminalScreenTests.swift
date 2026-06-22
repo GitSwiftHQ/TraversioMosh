@@ -293,6 +293,28 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func applicationKeypadModeEscapesAreUnsupportedLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-KEYPAD-UNSUPPORTED-OK"
+        let payload = "\u{1b}[2J\u{1b}[H"
+            + "\u{1b}[1;37Habcd\u{1b}=X"
+            + "\u{1b}[2;37Hwxyz\u{1b}>Y"
+            + "\u{1b}[6;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            String(repeating: " ", count: 36) + "abcX",
+            String(repeating: " ", count: 36) + "wxyY",
+            String(repeating: " ", count: 40),
+            String(repeating: " ", count: 40),
+            String(repeating: " ", count: 40),
+            marker + String(repeating: " ", count: 40 - marker.count)
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func c0ControlExecutesInsideEscapeWithoutEndingSequence() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
 
