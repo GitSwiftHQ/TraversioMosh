@@ -442,6 +442,10 @@ struct MoshTerminalPredictionEngine: Sendable {
 
         self.cull(baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
 
+        if case .stringControl = self.parserState {
+            return
+        }
+
         guard self.parserState == .ground,
               scalar.value >= 0x20,
               MoshTerminalCharacterWidth.width(of: scalar) == .narrow else {
