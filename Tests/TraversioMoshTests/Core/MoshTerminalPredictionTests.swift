@@ -420,4 +420,50 @@ struct MoshTerminalPredictionTests {
         #expect(projected.lineStrings == ["ABCD"])
         #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 1))
     }
+
+    @Test
+    func dcsPayloadDoesNotRenderInPredictionLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        let input: [UInt8] = [0x1b, UInt8(ascii: "P"), UInt8(ascii: "q")]
+            + Array("LOCAL".utf8)
+            + [0xc2, 0x9c]
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;2H".utf8)))
+        prediction.registerUserInput(
+            input,
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ABCD"])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func c1SOSPayloadDoesNotRenderInPredictionLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        let input: [UInt8] = [0xc2, 0x98] + Array("LOCAL".utf8) + [0xc2, 0x9c]
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;2H".utf8)))
+        prediction.registerUserInput(
+            input,
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ABCD"])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
 }

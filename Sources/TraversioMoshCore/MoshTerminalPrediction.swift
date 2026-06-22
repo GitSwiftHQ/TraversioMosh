@@ -29,7 +29,7 @@ struct MoshTerminalPredictionEngine: Sendable {
         case escape
         case controlSequence
         case ss3
-        case oscString
+        case stringControl(terminatesOnBell: Bool)
     }
 
     private static let bulkInputByteThreshold = 100
@@ -357,8 +357,13 @@ struct MoshTerminalPredictionEngine: Sendable {
             }
             self.parserState = .ground
             self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
-        case .oscString:
-            self.registerOSCStringByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+        case .stringControl(let terminatesOnBell):
+            self.registerStringControlByte(
+                byte,
+                terminatesOnBell: terminatesOnBell,
+                baseSnapshot: baseSnapshot,
+                nowMilliseconds: nowMilliseconds
+            )
         }
     }
 
@@ -409,8 +414,10 @@ struct MoshTerminalPredictionEngine: Sendable {
         switch byte {
         case 0x9b:
             self.parserState = .controlSequence
+        case 0x90, 0x98, 0x9e, 0x9f:
+            self.parserState = .stringControl(terminatesOnBell: false)
         case 0x9d:
-            self.parserState = .oscString
+            self.parserState = .stringControl(terminatesOnBell: true)
         case 0x9c:
             self.parserState = .ground
         default:
@@ -532,22 +539,28 @@ struct MoshTerminalPredictionEngine: Sendable {
         case UInt8(ascii: "["):
             self.parserState = .controlSequence
         case UInt8(ascii: "]"):
-            self.parserState = .oscString
+            self.parserState = .stringControl(terminatesOnBell: true)
+        case UInt8(ascii: "P"),
+             UInt8(ascii: "X"),
+             UInt8(ascii: "^"),
+             UInt8(ascii: "_"):
+            self.parserState = .stringControl(terminatesOnBell: false)
         default:
             self.parserState = .ground
             self.becomeTentative()
         }
     }
 
-    private mutating func registerOSCStringByte(
+    private mutating func registerStringControlByte(
         _ byte: UInt8,
+        terminatesOnBell: Bool,
         baseSnapshot: MoshTerminalScreenSnapshot,
         nowMilliseconds: UInt64
     ) {
         switch byte {
         case 0x1b:
             self.parserState = .escape
-        case 0x07:
+        case 0x07 where terminatesOnBell:
             self.parserState = .ground
         case 0x18, 0x1a:
             self.parserState = .ground
