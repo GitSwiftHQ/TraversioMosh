@@ -1271,6 +1271,24 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func unsupportedTabClearModesPreserveStopsAndPendingWrapLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 12, rows: 3))
+        let fixture = "\u{1b}[3g"
+            + "\u{1b}[1;5H\u{1b}H"
+            + "\u{1b}[1;1H\u{1b}[1g\tX"
+            + "\u{1b}[2;10Habc\u{1b}[1gZ"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(fixture.utf8)))
+
+        #expect(screen.snapshot.lineStrings == [
+            "    X       ",
+            "         abc",
+            "Z           ",
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 2, column: 1))
+    }
+
+    @Test
     func resizeExtendsDefaultTabStopsLikeOfficialMosh() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
 
