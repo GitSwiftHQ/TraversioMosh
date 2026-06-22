@@ -2432,6 +2432,16 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func c1NELInsideDCSExecutesAndReturnsToGroundLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}Pignored\u{0085}B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A   ", "B   "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func dcsParamIntermediateAndIgnoreStatesDoNotRenderPayload() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
 
