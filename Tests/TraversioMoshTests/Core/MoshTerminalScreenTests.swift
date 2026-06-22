@@ -1309,6 +1309,30 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func zeroCountHorizontalAndVerticalAbsolutePositioningUsesDefault() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 6, rows: 3))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    (
+                        "\u{1b}[2;4H\u{1b}[0GGG"
+                        + "\u{1b}[2;6H\u{1b}[0`H"
+                        + "\u{1b}[3;4H\u{1b}[0dV"
+                    ).utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == [
+            "   V  ",
+            "HG    ",
+            "      ",
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+    }
+
+    @Test
     func deviceAttributeQueriesReturnOfficialTerminalToHostReplies() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
