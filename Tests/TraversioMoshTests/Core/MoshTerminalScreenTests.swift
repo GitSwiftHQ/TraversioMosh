@@ -1583,6 +1583,21 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func csiEraseScreenModeTwoClearsFramebufferWithCurrentBackgroundAndPendingWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[44mabcd\u{1b}[2JX".utf8)))
+
+        let eraseAttributes = MoshTerminalTextAttributes(backgroundColor: .ansi(.blue, isBright: false))
+        #expect(screen.snapshot.lineStrings == ["   X", "    "])
+        #expect(screen.snapshot.rows[0][0].attributes == eraseAttributes)
+        #expect(screen.snapshot.rows[0][1].attributes == eraseAttributes)
+        #expect(screen.snapshot.rows[0][2].attributes == eraseAttributes)
+        #expect(screen.snapshot.rows[1].allSatisfy { $0.attributes == eraseAttributes })
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 3))
+    }
+
+    @Test
     func csiEraseScreenModeThreeClearsPendingWrapWithoutClearingFramebuffer() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
