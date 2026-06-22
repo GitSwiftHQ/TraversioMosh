@@ -796,6 +796,7 @@ struct MoshSessionTests {
 
         do {
             try await session.start()
+            try await Task.sleep(for: .milliseconds(10))
             await link.failIncoming(throwing: incomingError)
 
             let hostFailure = try await withSessionTimeout {

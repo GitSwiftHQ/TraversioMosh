@@ -20,6 +20,7 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
     private var isReceiving = false
     private var nextSendID: UInt64 = 0
     private var pendingSends: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var cancelledSendIDs: Set<UInt64> = []
     private var latestPathSnapshot: MoshNWDatagramPathSnapshot?
 
     public init(
@@ -90,17 +91,18 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                self.pendingSends[sendID] = continuation
-                self.connection.send(
-                    content: payload,
-                    contentContext: .defaultMessage,
-                    isComplete: true,
-                    completion: .contentProcessed { error in
-                        Task {
-                            await self.completeSend(sendID, error: error)
+                if self.storePendingSend(id: sendID, continuation: continuation) {
+                    self.connection.send(
+                        content: payload,
+                        contentContext: .defaultMessage,
+                        isComplete: true,
+                        completion: .contentProcessed { error in
+                            Task {
+                                await self.completeSend(sendID, error: error)
+                            }
                         }
-                    }
-                )
+                    )
+                }
             }
         } onCancel: {
             Task {
@@ -120,6 +122,23 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         self.continuation.finish()
         self.eventContinuation.finish()
         self.resumePendingSends(throwing: MoshDatagramTransportError.stopped)
+    }
+
+    private func storePendingSend(
+        id sendID: UInt64,
+        continuation: CheckedContinuation<Void, Error>
+    ) -> Bool {
+        if self.isStopped {
+            continuation.resume(throwing: MoshDatagramTransportError.stopped)
+            return false
+        }
+        if self.cancelledSendIDs.remove(sendID) != nil {
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+
+        self.pendingSends[sendID] = continuation
+        return true
     }
 
     private func handleState(_ state: NWConnection.State) {
@@ -213,6 +232,7 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
 
     private func cancelSend(_ sendID: UInt64) {
         guard let continuation = self.pendingSends.removeValue(forKey: sendID) else {
+            self.cancelledSendIDs.insert(sendID)
             return
         }
 
@@ -248,6 +268,7 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
     private func resumePendingSends(throwing error: Error) {
         let continuations = Array(self.pendingSends.values)
         self.pendingSends.removeAll()
+        self.cancelledSendIDs.removeAll()
         for continuation in continuations {
             continuation.resume(throwing: error)
         }
