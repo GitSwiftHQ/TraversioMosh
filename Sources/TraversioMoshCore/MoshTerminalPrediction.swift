@@ -347,6 +347,10 @@ struct MoshTerminalPredictionEngine: Sendable {
                 self.parserState = .escape
                 return
             }
+            if Self.isPredictionC0Prime(byte) {
+                self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+                return
+            }
             self.parserState = .ground
             self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         }
@@ -435,6 +439,21 @@ struct MoshTerminalPredictionEngine: Sendable {
         }
     }
 
+    private static func isPredictionC0Prime(_ byte: UInt8) -> Bool {
+        byte <= 0x17 || byte == 0x19 || (0x1c...0x1f).contains(byte)
+    }
+
+    private mutating func registerExecuteByte(
+        _ byte: UInt8,
+        baseSnapshot: MoshTerminalScreenSnapshot,
+        nowMilliseconds: UInt64
+    ) {
+        self.becomeTentative()
+        if byte == 0x0d {
+            self.predictCarriageReturnLineFeed(baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+        }
+    }
+
     private mutating func registerGroundByte(
         _ byte: UInt8,
         baseSnapshot: MoshTerminalScreenSnapshot,
@@ -468,6 +487,8 @@ struct MoshTerminalPredictionEngine: Sendable {
         switch byte {
         case 0x1b:
             self.parserState = .escape
+        case _ where Self.isPredictionC0Prime(byte):
+            self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         case UInt8(ascii: "O"):
             self.parserState = .ss3
         case UInt8(ascii: "["):
@@ -485,6 +506,11 @@ struct MoshTerminalPredictionEngine: Sendable {
     ) {
         guard byte != 0x1b else {
             self.parserState = .escape
+            return
+        }
+
+        if Self.isPredictionC0Prime(byte) {
+            self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
             return
         }
 
