@@ -900,6 +900,29 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func unsupportedANSIModesAreNoOpsButClearPendingWrapLikeOfficialMosh() throws {
+        var unsupportedSet = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 3))
+        try unsupportedSet.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[1hX".utf8)))
+        #expect(unsupportedSet.snapshot.lineStrings == ["abX", "   ", "   "])
+        #expect(unsupportedSet.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+
+        var unsupportedReset = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 3))
+        try unsupportedReset.apply(MoshTerminalOutput(bytes: Array("abc\u{1b}[1lY".utf8)))
+        #expect(unsupportedReset.snapshot.lineStrings == ["abY", "   ", "   "])
+        #expect(unsupportedReset.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+
+        var unsupportedSetDoesNotInsert = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+        try unsupportedSetDoesNotInsert.apply(MoshTerminalOutput(bytes: Array("abcd\r\u{1b}[1hX".utf8)))
+        #expect(unsupportedSetDoesNotInsert.snapshot.lineStrings == ["Xbcd", "    "])
+        #expect(unsupportedSetDoesNotInsert.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+
+        var mixedSetStillHandlesInsertMode = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+        try mixedSetStillHandlesInsertMode.apply(MoshTerminalOutput(bytes: Array("abcd\r\u{1b}[1;4hX".utf8)))
+        #expect(mixedSetStillHandlesInsertMode.snapshot.lineStrings == ["Xabc", "    "])
+        #expect(mixedSetStillHandlesInsertMode.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
     func bellControlIncrementsSnapshotCountWithoutRendering() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 1))
 
