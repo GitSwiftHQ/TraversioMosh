@@ -417,6 +417,7 @@ public struct MoshTerminalScreen: Sendable {
 
     public mutating func resize(_ dimensions: MoshTerminalDimensions) {
         let oldColumnCount = self.maximumColumn + 1
+        let dimensionsChanged = self.dimensions != dimensions
         self.dimensions = dimensions
         self.rows = self.resizedRows(self.rows, dimensions: dimensions)
         self.cursor = Self.clampedCursor(
@@ -431,7 +432,9 @@ public struct MoshTerminalScreen: Sendable {
         } else {
             self.activeGraphemeCursor = nil
         }
-        self.scrollRegion = .full(rowCount: self.rows.count)
+        if dimensionsChanged {
+            self.scrollRegion = .full(rowCount: self.rows.count)
+        }
         // Official Mosh preserves next_print_will_wrap across framebuffer resize.
         self.tabStops = self.tabStops.filter { $0 <= self.maximumColumn }
         if self.defaultTabStopsEnabled, oldColumnCount <= self.maximumColumn {

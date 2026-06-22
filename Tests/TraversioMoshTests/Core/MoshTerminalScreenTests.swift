@@ -1380,6 +1380,30 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func sameSizeResizePreservesScrollRegionLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("1111222233334444\u{1b}[2;3r\u{1b}[3;1H".utf8)))
+        screen.resize(try MoshTerminalDimensions(columns: 4, rows: 4))
+        try screen.apply(MoshTerminalOutput(bytes: Array("\nX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["1111", "3333", "X   ", "4444"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 2, column: 1))
+    }
+
+    @Test
+    func changedSizeResizeResetsScrollRegionLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("1111222233334444\u{1b}[2;3r".utf8)))
+        screen.resize(try MoshTerminalDimensions(columns: 4, rows: 5))
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[5;1H\nX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["2222", "3333", "4444", "    ", "X   "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: 1))
+    }
+
+    @Test
     func resizePreservesTopLeftCellsAndClampsCursor() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
