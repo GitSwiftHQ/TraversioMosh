@@ -2399,6 +2399,16 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func dcsBellDoesNotTerminateStringControlLikeOSC() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}Pignored\u{07}X\u{1b}\\B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func dcsParamIntermediateAndIgnoreStatesDoNotRenderPayload() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
 
