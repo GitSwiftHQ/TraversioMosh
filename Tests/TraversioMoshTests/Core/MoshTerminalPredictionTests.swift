@@ -377,4 +377,47 @@ struct MoshTerminalPredictionTests {
         #expect(projected.lineStrings == ["ABCD"])
         #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 2))
     }
+
+    @Test
+    func oscBELTerminatedPayloadDoesNotRenderInPredictionLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;2H".utf8)))
+        prediction.registerUserInput(
+            Array("\u{1b}]2;LOCAL\u{7}".utf8),
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ABCD"])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
+
+    @Test
+    func c1OSCStringPayloadDoesNotRenderInPredictionLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        let input: [UInt8] = [0xc2, 0x9d] + Array("2;LOCAL".utf8) + [0xc2, 0x9c]
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;2H".utf8)))
+        prediction.registerUserInput(
+            input,
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ABCD"])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 1))
+    }
 }

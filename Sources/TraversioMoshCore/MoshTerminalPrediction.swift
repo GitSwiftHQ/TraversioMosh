@@ -29,6 +29,7 @@ struct MoshTerminalPredictionEngine: Sendable {
         case escape
         case controlSequence
         case ss3
+        case oscString
     }
 
     private static let bulkInputByteThreshold = 100
@@ -356,6 +357,8 @@ struct MoshTerminalPredictionEngine: Sendable {
             }
             self.parserState = .ground
             self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+        case .oscString:
+            self.registerOSCStringByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         }
     }
 
@@ -403,9 +406,14 @@ struct MoshTerminalPredictionEngine: Sendable {
 
         self.cull(baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
 
-        if byte == 0x9b {
+        switch byte {
+        case 0x9b:
             self.parserState = .controlSequence
-        } else {
+        case 0x9d:
+            self.parserState = .oscString
+        case 0x9c:
+            self.parserState = .ground
+        default:
             self.parserState = .ground
             self.becomeTentative()
         }
@@ -523,9 +531,29 @@ struct MoshTerminalPredictionEngine: Sendable {
             self.parserState = .ss3
         case UInt8(ascii: "["):
             self.parserState = .controlSequence
+        case UInt8(ascii: "]"):
+            self.parserState = .oscString
         default:
             self.parserState = .ground
             self.becomeTentative()
+        }
+    }
+
+    private mutating func registerOSCStringByte(
+        _ byte: UInt8,
+        baseSnapshot: MoshTerminalScreenSnapshot,
+        nowMilliseconds: UInt64
+    ) {
+        switch byte {
+        case 0x1b:
+            self.parserState = .escape
+        case 0x07:
+            self.parserState = .ground
+        case 0x18, 0x1a:
+            self.parserState = .ground
+            self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+        default:
+            return
         }
     }
 
