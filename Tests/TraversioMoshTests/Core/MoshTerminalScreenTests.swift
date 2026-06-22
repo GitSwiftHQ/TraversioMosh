@@ -1630,6 +1630,20 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func unsupportedEraseModesClearPendingWrapWithoutClearingFramebuffer() throws {
+        var displayScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
+        var lineScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 2))
+
+        try displayScreen.apply(MoshTerminalOutput(bytes: Array("ABCDE\u{1b}[4JX".utf8)))
+        try lineScreen.apply(MoshTerminalOutput(bytes: Array("ABCDE\u{1b}[4KX".utf8)))
+
+        #expect(displayScreen.snapshot.lineStrings == ["ABCDX", "     "])
+        #expect(displayScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+        #expect(lineScreen.snapshot.lineStrings == ["ABCDX", "     "])
+        #expect(lineScreen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+    }
+
+    @Test
     func privateEraseDisplayIsUnsupportedDispatchLikeOfficialMosh() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
