@@ -2409,6 +2409,16 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func c1CSIInsideDCSStartsFreshCSISequenceLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}Pignored\u{009b}2CB".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A  B "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 4))
+    }
+
+    @Test
     func dcsParamIntermediateAndIgnoreStatesDoNotRenderPayload() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
 
