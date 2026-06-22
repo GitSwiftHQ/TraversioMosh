@@ -255,6 +255,24 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func zeroCountCursorTabulationUsesDefaultCountAndPreservesPendingWrap() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 12, rows: 2))
+        var forwardScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+        var backwardScreen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[3gU\u{1b}[0IV\u{1b}[1;10HW\u{1b}[0ZX".utf8)))
+        try forwardScreen.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[0IX".utf8)))
+        try backwardScreen.apply(MoshTerminalOutput(bytes: Array("abcd\u{1b}[0ZX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["X        W V", "            "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 1))
+        #expect(forwardScreen.snapshot.lineStrings == ["abcd", "X   "])
+        #expect(forwardScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+        #expect(backwardScreen.snapshot.lineStrings == ["abcd", "X   "])
+        #expect(backwardScreen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+    }
+
+    @Test
     func tabClearDoesNotClearPendingWrap() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
