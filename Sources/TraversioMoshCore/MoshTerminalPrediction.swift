@@ -27,6 +27,7 @@ struct MoshTerminalPredictionEngine: Sendable {
     private enum ParserState: Equatable, Sendable {
         case ground
         case escape
+        case escapeIntermediate
         case controlSequence
         case ss3
         case stringControl(terminatesOnBell: Bool)
@@ -341,6 +342,8 @@ struct MoshTerminalPredictionEngine: Sendable {
             self.registerGroundByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         case .escape:
             self.registerEscapeByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+        case .escapeIntermediate:
+            self.registerEscapeIntermediateByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         case .controlSequence:
             self.registerControlSequenceByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         case .ss3:
@@ -538,6 +541,8 @@ struct MoshTerminalPredictionEngine: Sendable {
             self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         case 0x7f:
             return
+        case 0x20...0x2f:
+            self.parserState = .escapeIntermediate
         case UInt8(ascii: "O"):
             self.parserState = .ss3
         case UInt8(ascii: "["):
@@ -549,6 +554,27 @@ struct MoshTerminalPredictionEngine: Sendable {
              UInt8(ascii: "^"),
              UInt8(ascii: "_"):
             self.parserState = .stringControl(terminatesOnBell: false)
+        default:
+            self.parserState = .ground
+            self.becomeTentative()
+        }
+    }
+
+    private mutating func registerEscapeIntermediateByte(
+        _ byte: UInt8,
+        baseSnapshot: MoshTerminalScreenSnapshot,
+        nowMilliseconds: UInt64
+    ) {
+        switch byte {
+        case 0x1b:
+            self.parserState = .escape
+        case _ where Self.isPredictionC0Prime(byte):
+            self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+        case 0x7f, 0x20...0x2f:
+            return
+        case 0x30...0x7e:
+            self.parserState = .ground
+            self.becomeTentative()
         default:
             self.parserState = .ground
             self.becomeTentative()
