@@ -188,4 +188,25 @@ struct MoshTerminalPredictionTests {
         #expect(confirmedAttributes.foregroundColor == .ansi(.red, isBright: false))
         #expect(projected.rows[0][1].attributes == confirmedAttributes)
     }
+
+    @Test
+    func escapeRestartBeforeSS3CursorControlMatchesOfficialOverlayParser() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .experimental)
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCD\u{1b}[1;2H".utf8)))
+        prediction.registerUserInput(
+            [0x1b, 0x1b, UInt8(ascii: "O"), UInt8(ascii: "C")],
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ABCD"])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
 }

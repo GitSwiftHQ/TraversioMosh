@@ -343,6 +343,10 @@ struct MoshTerminalPredictionEngine: Sendable {
         case .controlSequence:
             self.registerControlSequenceByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         case .ss3:
+            guard byte != 0x1b else {
+                self.parserState = .escape
+                return
+            }
             self.parserState = .ground
             self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         }
@@ -462,6 +466,8 @@ struct MoshTerminalPredictionEngine: Sendable {
         nowMilliseconds: UInt64
     ) {
         switch byte {
+        case 0x1b:
+            self.parserState = .escape
         case UInt8(ascii: "O"):
             self.parserState = .ss3
         case UInt8(ascii: "["):
@@ -477,6 +483,11 @@ struct MoshTerminalPredictionEngine: Sendable {
         baseSnapshot: MoshTerminalScreenSnapshot,
         nowMilliseconds: UInt64
     ) {
+        guard byte != 0x1b else {
+            self.parserState = .escape
+            return
+        }
+
         if (0x30...0x3f).contains(byte) || (0x20...0x2f).contains(byte) {
             return
         }
