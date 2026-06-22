@@ -163,6 +163,10 @@ struct MoshTerminalPredictionEngine: Sendable {
                         row.cells[index],
                         nowMilliseconds: nowMilliseconds
                     )
+                    row.updateReplacementAttributes(
+                        from: index,
+                        attributes: baseSnapshot.rows[rowNumber][index].attributes
+                    )
                     if row.cells[index].tentativeUntilEpoch > self.confirmedEpoch {
                         self.confirmedEpoch = row.cells[index].tentativeUntilEpoch
                     }
@@ -880,6 +884,29 @@ private struct PredictedRow: Equatable, Sendable {
                 to: &rows[self.rowNumber],
                 confirmedEpoch: confirmedEpoch,
                 underlinePredictions: underlinePredictions
+            )
+        }
+    }
+
+    mutating func updateReplacementAttributes(
+        from startIndex: Int,
+        attributes: MoshTerminalTextAttributes
+    ) {
+        guard self.cells.indices.contains(startIndex) else {
+            return
+        }
+
+        for index in startIndex..<self.cells.count {
+            guard self.cells[index].active,
+                  self.cells[index].unknown == false,
+                  let replacement = self.cells[index].replacement else {
+                continue
+            }
+
+            self.cells[index].replacement = MoshTerminalCell(
+                contents: replacement.contents,
+                attributes: attributes,
+                hyperlink: replacement.hyperlink
             )
         }
     }

@@ -123,4 +123,38 @@ struct MoshTerminalPredictionTests {
         #expect(projected.lineStrings == ["CBCD"])
         #expect(projected.rows[0].map { $0.attributes.isUnderlined } == [true, true, true, false])
     }
+
+    @Test
+    func confirmedEchoUpdatesLaterPredictionAttributesLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .always)
+        )
+        prediction.setSendIntervalMilliseconds(20)
+
+        prediction.setLocalFrameSent(1)
+        prediction.registerUserInput(
+            Array("a".utf8),
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+        prediction.setLocalFrameSent(2)
+        prediction.registerUserInput(
+            Array("b".utf8),
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 1
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("\u{1b}[31ma".utf8)))
+        prediction.setLocalFrameLateAcknowledged(2)
+        prediction.cull(baseSnapshot: screen.snapshot, nowMilliseconds: 2)
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+        let confirmedAttributes = projected.rows[0][0].attributes
+
+        #expect(projected.lineStrings == ["ab  "])
+        #expect(confirmedAttributes.foregroundColor == .ansi(.red, isBright: false))
+        #expect(projected.rows[0][1].attributes == confirmedAttributes)
+    }
 }
