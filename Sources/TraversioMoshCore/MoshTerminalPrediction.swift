@@ -372,7 +372,13 @@ struct MoshTerminalPredictionEngine: Sendable {
                 nowMilliseconds: nowMilliseconds
             )
         case .control(let control):
-            if let byte = Self.byte(for: control) {
+            if case .c1(let byte) = control {
+                self.registerUserC1Byte(
+                    byte,
+                    baseSnapshot: baseSnapshot,
+                    nowMilliseconds: nowMilliseconds
+                )
+            } else if let byte = Self.byte(for: control) {
                 self.registerUserByte(
                     byte,
                     baseSnapshot: baseSnapshot,
@@ -383,6 +389,25 @@ struct MoshTerminalPredictionEngine: Sendable {
                 self.parserState = .ground
                 self.becomeTentative()
             }
+        }
+    }
+
+    private mutating func registerUserC1Byte(
+        _ byte: UInt8,
+        baseSnapshot: MoshTerminalScreenSnapshot,
+        nowMilliseconds: UInt64
+    ) {
+        if self.configuration.displayPreference == .experimental {
+            self.predictionEpoch = self.confirmedEpoch
+        }
+
+        self.cull(baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+
+        if byte == 0x9b {
+            self.parserState = .controlSequence
+        } else {
+            self.parserState = .ground
+            self.becomeTentative()
         }
     }
 
