@@ -2348,6 +2348,28 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func zeroCountScrollCommandsUseDefaultCount() throws {
+        var scrolledUp = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
+        var scrolledDown = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
+        let setup = "\u{1b}[44m"
+            + "\u{1b}[1;1H111"
+            + "\u{1b}[2;1H222"
+            + "\u{1b}[3;1H333"
+            + "\u{1b}[4;1H444"
+            + "\u{1b}[2;4r"
+
+        try scrolledUp.apply(MoshTerminalOutput(bytes: Array((setup + "\u{1b}[0S").utf8)))
+        try scrolledDown.apply(MoshTerminalOutput(bytes: Array((setup + "\u{1b}[0T").utf8)))
+
+        let eraseAttributes = MoshTerminalTextAttributes(backgroundColor: .ansi(.blue, isBright: false))
+        #expect(scrolledUp.snapshot.lineStrings == ["111", "333", "444", "   "])
+        #expect(scrolledUp.snapshot.rows[3].allSatisfy { $0.attributes == eraseAttributes })
+
+        #expect(scrolledDown.snapshot.lineStrings == ["111", "   ", "222", "333"])
+        #expect(scrolledDown.snapshot.rows[1].allSatisfy { $0.attributes == eraseAttributes })
+    }
+
+    @Test
     func alternateScreenPrivateModesAreConsumedWithoutChangingScreenState() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
