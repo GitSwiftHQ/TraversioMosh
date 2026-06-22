@@ -432,6 +432,7 @@ public actor MoshSession {
         self.maintenanceGeneration &+= 1
         self.maintenanceTask?.cancel()
         self.maintenanceTask = nil
+        await self.runtime?.stop()
         self.runtime = nil
         if let error {
             self.hostOperationContinuation.finish(throwing: error)

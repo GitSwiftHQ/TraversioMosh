@@ -777,6 +777,59 @@ struct MoshSessionTests {
     }
 
     @Test
+    func receiveTaskFailureStopsRuntimeAndFinishesStreams() async throws {
+        let incomingError = MoshDatagramTransportError.notConnected
+        let link = IncomingFailureDatagramLink()
+        let sessionKey = try MoshSessionKey(rawBytes: sessionKeyBytes)
+        let endpoint = MoshEndpoint(host: "localhost", port: 60_001, sessionKey: sessionKey)
+        let session = MoshSession(
+            configuration: MoshSessionConfiguration(
+                endpoint: endpoint,
+                initialTerminalDimensions: try MoshTerminalDimensions(columns: 80, rows: 24),
+                transportFactory: IncomingFailureTransportFactory(link: link),
+                chaffSource: .none
+            )
+        )
+        let hostFailureTask = collectStreamFailure(from: session.hostOperations)
+        let renderFailureTask = collectStreamFailure(from: session.renderOperations)
+        let diagnosticEventTask = collectEvents(from: session, count: 2)
+
+        do {
+            try await session.start()
+            await link.failIncoming(throwing: incomingError)
+
+            let hostFailure = try await withSessionTimeout {
+                await hostFailureTask.value
+            }
+            let renderFailure = try await withSessionTimeout {
+                await renderFailureTask.value
+            }
+            let diagnosticEvents = try await withSessionTimeout {
+                await diagnosticEventTask.value
+            }
+
+            #expect((hostFailure as? MoshDatagramTransportError) == incomingError)
+            #expect((renderFailure as? MoshDatagramTransportError) == incomingError)
+            #expect(
+                diagnosticEvents == [
+                    .started(endpoint),
+                    .stopped,
+                ]
+            )
+            #expect(await link.stopCount() == 1)
+            await expectSessionError(.stopped) {
+                try await session.sendKeystrokes([0x61])
+            }
+        } catch {
+            hostFailureTask.cancel()
+            renderFailureTask.cancel()
+            diagnosticEventTask.cancel()
+            await session.stop()
+            throw error
+        }
+    }
+
+    @Test
     func maintenanceLoopSendsInitialResizeAfterMinimumDelay() async throws {
         let timing = MoshSSPSendTimingConfiguration(
             sendIntervalMilliseconds: 0,
@@ -1259,6 +1312,14 @@ private struct FailingSendTransportFactory: MoshSessionTransportFactory {
     }
 }
 
+private struct IncomingFailureTransportFactory: MoshSessionTransportFactory {
+    let link: IncomingFailureDatagramLink
+
+    func makeDatagramLink(for endpoint: MoshEndpoint) async throws -> any MoshDatagramLink {
+        self.link
+    }
+}
+
 private actor FailingSendDatagramLink: MoshDatagramLink {
     nonisolated let incomingDatagrams: MoshDatagramStream
 
@@ -1290,6 +1351,46 @@ private actor FailingSendDatagramLink: MoshDatagramLink {
     func stop() async {
         self.stopCountStorage += 1
         self.incomingContinuation.finish()
+    }
+
+    func stopCount() -> Int {
+        self.stopCountStorage
+    }
+}
+
+private actor IncomingFailureDatagramLink: MoshDatagramLink {
+    nonisolated let incomingDatagrams: MoshDatagramStream
+
+    private let incomingContinuation: MoshDatagramStream.Continuation
+    private var stopCountStorage = 0
+
+    init() {
+        var capturedContinuation: MoshDatagramStream.Continuation?
+        self.incomingDatagrams = MoshDatagramStream(
+            bufferingPolicy: .bufferingNewest(1)
+        ) { continuation in
+            capturedContinuation = continuation
+        }
+
+        guard let capturedContinuation else {
+            preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+        self.incomingContinuation = capturedContinuation
+    }
+
+    func start() async throws {}
+
+    func send(_ datagram: [UInt8]) async throws {
+        _ = datagram
+    }
+
+    func stop() async {
+        self.stopCountStorage += 1
+        self.incomingContinuation.finish()
+    }
+
+    func failIncoming(throwing error: Error) {
+        self.incomingContinuation.finish(throwing: error)
     }
 
     func stopCount() -> Int {
