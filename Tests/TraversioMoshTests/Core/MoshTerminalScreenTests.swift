@@ -475,6 +475,38 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func dcsHighUnicodeParserTransitionsLiveFixtureMatchesOfficialScreenState() throws {
+        let marker = "TERMINAL-SCREEN-DCS-HIGH-UNICODE-OK"
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    (
+                        "\u{1b}[2J\u{1b}[H"
+                        + "A\u{1b}P\u{4f60}entry\u{1b}\\B"
+                        + "\u{1b}[2;1HC\u{1b}P1;2\u{4f60}param\u{1b}\\D"
+                        + "\u{1b}[3;1HE\u{1b}P$\u{4f60}intermediate\u{1b}\\F"
+                        + "\u{1b}[4;1HG\u{1b}P:\u{4f60}entry-ignore\u{1b}\\H"
+                        + "\u{1b}[5;1HI\u{1b}P1:\u{4f60}param-ignore\u{1b}\\J"
+                        + "\u{1b}[6;1H\(marker)"
+                    ).utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == [
+            "AB" + String(repeating: " ", count: 38),
+            "CD" + String(repeating: " ", count: 38),
+            "EF" + String(repeating: " ", count: 38),
+            "GH" + String(repeating: " ", count: 38),
+            "IJ" + String(repeating: " ", count: 38),
+            marker + String(repeating: " ", count: 40 - marker.count),
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func cancelControlInsideCSIClearsSequenceAndPendingWrap() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
 
