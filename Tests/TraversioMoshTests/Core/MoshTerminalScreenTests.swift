@@ -445,6 +445,36 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func highUnicodeParserTransitionsLiveFixtureMatchesOfficialScreenState() throws {
+        let marker = "TERMINAL-SCREEN-HIGH-UNICODE-PARSER-OK"
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    (
+                        "\u{1b}[2J\u{1b}[H"
+                        + "\u{1b}[1;38Habc\u{1b}[\u{4f60}X"
+                        + "\u{1b}[2;38Habc\u{1b}[1:\u{a0}Y"
+                        + "\u{1b}[4;38Habc\u{1b}#\u{4f60}Z"
+                        + "\u{1b}[6;1H\(marker)"
+                    ).utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == [
+            String(repeating: " ", count: 37) + "abX",
+            String(repeating: " ", count: 37) + "abc",
+            "Y" + String(repeating: " ", count: 39),
+            String(repeating: " ", count: 37) + "abZ",
+            String(repeating: " ", count: 40),
+            marker + String(repeating: " ", count: 40 - marker.count),
+        ])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func cancelControlInsideCSIClearsSequenceAndPendingWrap() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
 
