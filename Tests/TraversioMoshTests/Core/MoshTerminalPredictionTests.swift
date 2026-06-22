@@ -487,6 +487,40 @@ struct MoshTerminalPredictionTests {
     }
 
     @Test
+    func highUnicodeInsideCSIIgnoreKeepsFollowingPredictionConfirmedLikeOfficialOverlay() throws {
+        let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
+        var screen = MoshTerminalScreen(dimensions: dimensions)
+        var prediction = MoshTerminalPredictionEngine(
+            configuration: MoshPredictionConfiguration(displayPreference: .always)
+        )
+
+        prediction.setLocalFrameSent(1)
+        prediction.registerUserInput(
+            Array("a".utf8),
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 0
+        )
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("a".utf8)))
+        prediction.setLocalFrameLateAcknowledged(2)
+        prediction.cull(baseSnapshot: screen.snapshot, nowMilliseconds: 1)
+
+        prediction.setLocalFrameSent(2)
+        let input = [0x1b, UInt8(ascii: "["), UInt8(ascii: "1"), UInt8(ascii: ":")]
+            + Array("中b".utf8)
+        prediction.registerUserInput(
+            input,
+            baseSnapshot: screen.snapshot,
+            nowMilliseconds: 2
+        )
+
+        let projected = prediction.projectedSnapshot(baseSnapshot: screen.snapshot)
+
+        #expect(projected.lineStrings == ["ab  "])
+        #expect(projected.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func oscBELTerminatedPayloadDoesNotRenderInPredictionLikeOfficialOverlay() throws {
         let dimensions = try MoshTerminalDimensions(columns: 4, rows: 1)
         var screen = MoshTerminalScreen(dimensions: dimensions)

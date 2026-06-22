@@ -461,6 +461,11 @@ struct MoshTerminalPredictionEngine: Sendable {
             return
         }
 
+        if case .controlSequence(.ignore) = self.parserState {
+            self.parserState = .ground
+            return
+        }
+
         guard self.parserState == .ground,
               scalar.value >= 0x20,
               MoshTerminalCharacterWidth.width(of: scalar) == .narrow else {
