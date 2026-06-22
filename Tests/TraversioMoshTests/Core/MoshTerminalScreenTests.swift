@@ -1889,6 +1889,23 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func unsupportedOSCClipboardSelectionsDoNotChangeSnapshotMetadata() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-OSC52-UNSUPPORTED-OK"
+        let payload = "\u{1b}]52;c;original-clipboard\u{07}"
+            + "\u{1b}]52;p;ignored-selection\u{07}"
+            + "\u{1b}]52;;ignored-empty-selection\u{07}"
+            + "\u{1b}[2J\u{1b}[5;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.clipboard == "original-clipboard")
+        #expect(screen.snapshot.lineStrings[4] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 4, column: marker.count))
+        #expect(screen.snapshot.bellCount == 0)
+    }
+
+    @Test
     func oscClipboardPayloadTruncatesAtOfficialCollectionLimit() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
         let maximumOSCPayloadScalars = 16 * 1024
