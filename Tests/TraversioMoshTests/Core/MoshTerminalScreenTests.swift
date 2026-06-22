@@ -1986,6 +1986,19 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func c1NELInsideOSCFinalizesMetadataExecutesAndReturnsToGroundLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}]2;Nested Title\u{0085}B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["A   ", "B   "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 1))
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "")
+        #expect(screen.snapshot.windowTitle == "Nested Title")
+    }
+
+    @Test
     func dcsCancelControlExitsStringBeforeNextPrintable() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
 
