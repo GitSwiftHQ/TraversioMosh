@@ -2297,6 +2297,34 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func zeroCountLineEditCommandsUseDefaultCount() throws {
+        var inserted = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
+        var deleted = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 4))
+        let setup = "\u{1b}[44m"
+            + "\u{1b}[1;1H111"
+            + "\u{1b}[2;1H222"
+            + "\u{1b}[3;1H333"
+            + "\u{1b}[4;1H444"
+            + "\u{1b}[2;4r"
+
+        try inserted.apply(
+            MoshTerminalOutput(bytes: Array((setup + "\u{1b}[3;2H\u{1b}[0L").utf8))
+        )
+        try deleted.apply(
+            MoshTerminalOutput(bytes: Array((setup + "\u{1b}[2;2H\u{1b}[0M").utf8))
+        )
+
+        let eraseAttributes = MoshTerminalTextAttributes(backgroundColor: .ansi(.blue, isBright: false))
+        #expect(inserted.snapshot.lineStrings == ["111", "222", "   ", "333"])
+        #expect(inserted.snapshot.rows[2].allSatisfy { $0.attributes == eraseAttributes })
+        #expect(inserted.snapshot.cursor == MoshTerminalCursor(row: 2, column: 0))
+
+        #expect(deleted.snapshot.lineStrings == ["111", "333", "444", "   "])
+        #expect(deleted.snapshot.rows[3].allSatisfy { $0.attributes == eraseAttributes })
+        #expect(deleted.snapshot.cursor == MoshTerminalCursor(row: 1, column: 0))
+    }
+
+    @Test
     func csiInsertLineOutsideScrollRegionStillClearsPendingWrapAndMovesToFirstColumn() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 3))
 
