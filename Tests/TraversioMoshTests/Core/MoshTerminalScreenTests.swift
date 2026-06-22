@@ -2459,6 +2459,16 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func missingScrollRegionTopDefaultsToScreenTopLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("1111222233334444\u{1b}[;3r\u{1b}[3;1H\nX".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["2222", "3333", "X   ", "4444"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 2, column: 1))
+    }
+
+    @Test
     func scrollRegionAutoscrollControlsLiveFixtureMatchesOfficialScreenState() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
         let marker = "TERMINAL-SCREEN-SCROLL-CONTROLS-OK"
