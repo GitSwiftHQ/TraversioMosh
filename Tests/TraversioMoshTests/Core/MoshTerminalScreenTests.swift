@@ -2483,6 +2483,20 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func zeroCountCharacterEditCommandsUseDefaultCount() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 2))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array("ABCDE\u{1b}[1;3H\u{1b}[0@X\u{1b}[2;1Habcdef\u{1b}[2;3H\u{1b}[0P\u{1b}[2;5H\u{1b}[0X".utf8)
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["ABXCDE  ", "abde    "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 4))
+    }
+
+    @Test
     func rowOperationsUseCurrentBackgroundForIntroducedRows() throws {
         var inserted = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 3))
         var scrolled = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 3))
