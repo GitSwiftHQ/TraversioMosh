@@ -1254,6 +1254,16 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func zeroCursorPositionParametersUseOfficialDefaults() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 5, rows: 3))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("ABCDE\u{1b}[3;4Hxy\u{1b}[0;0HQ\u{1b}[3;4Hzz\u{1b}[0;2fR".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["QRCDE", "     ", "   zz"])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+    }
+
+    @Test
     func unregisteredCursorMovementFinalsClearPendingWrapWithoutMoving() throws {
         let finals = [
             UInt8(ascii: "E"),
