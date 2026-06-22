@@ -1955,6 +1955,60 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func dcsParamIntermediateAndIgnoreStatesDoNotRenderPayload() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
+
+        try screen.apply(
+            MoshTerminalOutput(
+                bytes: Array(
+                    (
+                        "A"
+                            + "\u{1b}P1;2qparam\u{1b}\\B"
+                            + "\u{1b}P$qintermediate\u{1b}\\C"
+                            + "\u{1b}P:entry-ignore\u{1b}\\D"
+                            + "\u{1b}P1:param-ignore\u{1b}\\E"
+                            + "\u{1b}P$1intermediate-ignore\u{1b}\\F"
+                    ).utf8
+                )
+            )
+        )
+
+        #expect(screen.snapshot.lineStrings == ["ABCDEF  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 6))
+    }
+
+    @Test
+    func stringControlLiveFixtureMatchesOfficialScreenState() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 40, rows: 6))
+        let marker = "TERMINAL-SCREEN-STRING-CONTROL-OK"
+        let payload = "\u{1b}[2J\u{1b}[H"
+            + "A\u{1b}Pignored\u{1b}\\B"
+            + "\u{1b}P1;2qparam\u{1b}\\C"
+            + "\u{1b}P$qintermediate\u{1b}\\D"
+            + "\u{1b}P:entry-ignore\u{1b}\\E"
+            + "\u{1b}P1:param-ignore\u{1b}\\F"
+            + "\u{1b}P$1intermediate-ignore\u{1b}\\G"
+            + "\u{1b}^hidden\u{1b}\\H"
+            + "\u{1b}_skip\u{1b}\\I"
+            + "\u{1b}Xsos\u{1b}\\J"
+            + "\u{1b}[2;1HK\u{1b}]52;c;mosh-live-clipboard\u{07}L"
+            + "\u{1b}[3;1HM\u{1b}]2;String Title\u{0018}N"
+            + "\u{1b}[6;1H\(marker)"
+
+        try screen.apply(MoshTerminalOutput(bytes: Array(payload.utf8)))
+
+        #expect(screen.snapshot.lineStrings[0] == "ABCDEFGHIJ" + String(repeating: " ", count: 30))
+        #expect(screen.snapshot.lineStrings[1] == "KL" + String(repeating: " ", count: 38))
+        #expect(screen.snapshot.lineStrings[2] == "MN" + String(repeating: " ", count: 38))
+        #expect(screen.snapshot.lineStrings[5] == marker + String(repeating: " ", count: 40 - marker.count))
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "")
+        #expect(screen.snapshot.windowTitle == "String Title")
+        #expect(screen.snapshot.clipboard == "mosh-live-clipboard")
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 5, column: marker.count))
+    }
+
+    @Test
     func scrollRegionConstrainsLineFeedScrolling() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 4))
 
