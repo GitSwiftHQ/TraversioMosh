@@ -28,9 +28,16 @@ struct MoshTerminalPredictionEngine: Sendable {
         case ground
         case escape
         case escapeIntermediate
-        case controlSequence
+        case controlSequence(CSIParserState)
         case ss3
         case stringControl(terminatesOnBell: Bool)
+    }
+
+    private enum CSIParserState: Equatable, Sendable {
+        case entry
+        case parameter
+        case intermediate
+        case ignore
     }
 
     private static let bulkInputByteThreshold = 100
@@ -344,8 +351,13 @@ struct MoshTerminalPredictionEngine: Sendable {
             self.registerEscapeByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
         case .escapeIntermediate:
             self.registerEscapeIntermediateByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
-        case .controlSequence:
-            self.registerControlSequenceByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+        case .controlSequence(let state):
+            self.registerControlSequenceByte(
+                byte,
+                state: state,
+                baseSnapshot: baseSnapshot,
+                nowMilliseconds: nowMilliseconds
+            )
         case .ss3:
             guard byte != 0x1b else {
                 self.parserState = .escape
@@ -416,7 +428,7 @@ struct MoshTerminalPredictionEngine: Sendable {
 
         switch byte {
         case 0x9b:
-            self.parserState = .controlSequence
+            self.parserState = .controlSequence(.entry)
         case 0x90, 0x98, 0x9e, 0x9f:
             self.parserState = .stringControl(terminatesOnBell: false)
         case 0x9d:
@@ -546,7 +558,7 @@ struct MoshTerminalPredictionEngine: Sendable {
         case UInt8(ascii: "O"):
             self.parserState = .ss3
         case UInt8(ascii: "["):
-            self.parserState = .controlSequence
+            self.parserState = .controlSequence(.entry)
         case UInt8(ascii: "]"):
             self.parserState = .stringControl(terminatesOnBell: true)
         case UInt8(ascii: "P"),
@@ -602,6 +614,7 @@ struct MoshTerminalPredictionEngine: Sendable {
 
     private mutating func registerControlSequenceByte(
         _ byte: UInt8,
+        state: CSIParserState,
         baseSnapshot: MoshTerminalScreenSnapshot,
         nowMilliseconds: UInt64
     ) {
@@ -619,17 +632,62 @@ struct MoshTerminalPredictionEngine: Sendable {
             return
         }
 
-        if (0x30...0x3f).contains(byte) || (0x20...0x2f).contains(byte) {
+        if byte == 0x18 || byte == 0x1a {
+            self.parserState = .ground
+            self.registerExecuteByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
             return
         }
 
-        self.parserState = .ground
-        guard (0x40...0x7e).contains(byte) else {
-            self.becomeTentative()
-            return
+        switch state {
+        case .entry:
+            switch byte {
+            case 0x30...0x39, 0x3b, 0x3c...0x3f:
+                self.parserState = .controlSequence(.parameter)
+            case 0x3a:
+                self.parserState = .controlSequence(.ignore)
+            case 0x20...0x2f:
+                self.parserState = .controlSequence(.intermediate)
+            case 0x40...0x7e:
+                self.parserState = .ground
+                self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+            default:
+                self.parserState = .ground
+                self.becomeTentative()
+            }
+        case .parameter:
+            switch byte {
+            case 0x30...0x39, 0x3b:
+                return
+            case 0x3a, 0x3c...0x3f:
+                self.parserState = .controlSequence(.ignore)
+            case 0x20...0x2f:
+                self.parserState = .controlSequence(.intermediate)
+            case 0x40...0x7e:
+                self.parserState = .ground
+                self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+            default:
+                self.parserState = .ground
+                self.becomeTentative()
+            }
+        case .intermediate:
+            switch byte {
+            case 0x20...0x2f:
+                return
+            case 0x30...0x3f:
+                self.parserState = .controlSequence(.ignore)
+            case 0x40...0x7e:
+                self.parserState = .ground
+                self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
+            default:
+                self.parserState = .ground
+                self.becomeTentative()
+            }
+        case .ignore:
+            guard (0x40...0x7e).contains(byte) else {
+                return
+            }
+            self.parserState = .ground
         }
-
-        self.registerCursorControlByte(byte, baseSnapshot: baseSnapshot, nowMilliseconds: nowMilliseconds)
     }
 
     private mutating func registerCursorControlByte(
