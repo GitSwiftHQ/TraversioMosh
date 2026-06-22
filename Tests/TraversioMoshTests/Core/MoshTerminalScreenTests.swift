@@ -1986,6 +1986,19 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func c1OSCInsideOSCFinalizesPreviousMetadataAndStartsFreshOSCLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}]2;First Title\u{009d}3;Ignored\u{07}B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "")
+        #expect(screen.snapshot.windowTitle == "First Title")
+    }
+
+    @Test
     func c1NELInsideOSCFinalizesMetadataExecutesAndReturnsToGroundLikeOfficialMosh() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
 
