@@ -2419,6 +2419,19 @@ struct MoshTerminalScreenTests {
     }
 
     @Test
+    func c1OSCInsideDCSStartsFreshOSCStringLikeOfficialMosh() throws {
+        var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 1))
+
+        try screen.apply(MoshTerminalOutput(bytes: Array("A\u{1b}Pignored\u{009d}2;Nested Title\u{07}B".utf8)))
+
+        #expect(screen.snapshot.lineStrings == ["AB  "])
+        #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 0, column: 2))
+        #expect(screen.snapshot.titleInitialized == true)
+        #expect(screen.snapshot.iconName == "")
+        #expect(screen.snapshot.windowTitle == "Nested Title")
+    }
+
+    @Test
     func dcsParamIntermediateAndIgnoreStatesDoNotRenderPayload() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 8, rows: 1))
 
