@@ -906,6 +906,69 @@ struct MoshSessionTests {
     }
 
     @Test
+    func userSendFailureStopsRuntimeAndFinishesStreams() async throws {
+        let sendError = MoshDatagramTransportError.notConnected
+        let link = FailingAfterSendDatagramLink(failOnSendNumber: 2, sendError: sendError)
+        let sessionKey = try MoshSessionKey(rawBytes: sessionKeyBytes)
+        let endpoint = MoshEndpoint(host: "localhost", port: 60_001, sessionKey: sessionKey)
+        let session = MoshSession(
+            configuration: MoshSessionConfiguration(
+                endpoint: endpoint,
+                initialTerminalDimensions: try MoshTerminalDimensions(columns: 80, rows: 24),
+                transportFactory: FailingAfterSendTransportFactory(link: link),
+                timing: MoshSSPSendTimingConfiguration(
+                    sendIntervalMilliseconds: 0,
+                    acknowledgementIntervalMilliseconds: 1_000,
+                    activeRetryTimeoutMilliseconds: 10_000,
+                    sendMinimumDelayMilliseconds: 0,
+                    timeoutMilliseconds: 1_000,
+                    shutdownMaximumAttempts: 16
+                ),
+                chaffSource: .none
+            )
+        )
+        let hostFailureTask = collectStreamFailure(from: session.hostOperations)
+        let renderFailureTask = collectStreamFailure(from: session.renderOperations)
+        let diagnosticEventTask = collectEvents(from: session, count: 3)
+
+        do {
+            try await session.start()
+            do {
+                try await session.sendKeystrokes([0x61])
+                Issue.record("Expected sendKeystrokes to fail after the datagram link rejected send.")
+            } catch let error as MoshDatagramTransportError {
+                #expect(error == sendError)
+            } catch {
+                Issue.record("Expected MoshDatagramTransportError.notConnected, received \(error).")
+            }
+
+            let diagnosticEvents = try await withSessionTimeout {
+                await diagnosticEventTask.value
+            }
+            let hostFailure = try await withSessionTimeout {
+                await hostFailureTask.value
+            }
+            let renderFailure = try await withSessionTimeout {
+                await renderFailureTask.value
+            }
+
+            #expect(diagnosticEvents == [.started(endpoint), .datagramsSent(packetCount: 1), .stopped])
+            #expect((hostFailure as? MoshDatagramTransportError) == sendError)
+            #expect((renderFailure as? MoshDatagramTransportError) == sendError)
+            #expect(await link.stopCount() == 1)
+            await expectSessionError(.stopped) {
+                try await session.sendKeystrokes([0x62])
+            }
+        } catch {
+            hostFailureTask.cancel()
+            renderFailureTask.cancel()
+            diagnosticEventTask.cancel()
+            await session.stop()
+            throw error
+        }
+    }
+
+    @Test
     func maintenanceLoopSendsInitialResizeAfterMinimumDelay() async throws {
         let timing = MoshSSPSendTimingConfiguration(
             sendIntervalMilliseconds: 0,
@@ -1494,6 +1557,14 @@ private struct FailingSendTransportFactory: MoshSessionTransportFactory {
     }
 }
 
+private struct FailingAfterSendTransportFactory: MoshSessionTransportFactory {
+    let link: FailingAfterSendDatagramLink
+
+    func makeDatagramLink(for endpoint: MoshEndpoint) async throws -> any MoshDatagramLink {
+        self.link
+    }
+}
+
 private struct IncomingFailureTransportFactory: MoshSessionTransportFactory {
     let link: IncomingFailureDatagramLink
 
@@ -1533,6 +1604,50 @@ private actor FailingSendDatagramLink: MoshDatagramLink {
     func stop() async {
         self.stopCountStorage += 1
         self.incomingContinuation.finish()
+    }
+
+    func stopCount() -> Int {
+        self.stopCountStorage
+    }
+}
+
+private actor FailingAfterSendDatagramLink: MoshDatagramLink {
+    nonisolated let incomingDatagrams: MoshDatagramStream
+
+    private let continuation: MoshDatagramStream.Continuation
+    private let failOnSendNumber: Int
+    private let sendError: MoshDatagramTransportError
+    private var sendCountStorage = 0
+    private var stopCountStorage = 0
+
+    init(failOnSendNumber: Int, sendError: MoshDatagramTransportError) {
+        var capturedContinuation: MoshDatagramStream.Continuation?
+        let stream = MoshDatagramStream { continuation in
+            capturedContinuation = continuation
+        }
+
+        guard let capturedContinuation else {
+            preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+        self.incomingDatagrams = stream
+        self.continuation = capturedContinuation
+        self.failOnSendNumber = failOnSendNumber
+        self.sendError = sendError
+    }
+
+    func start() async throws {}
+
+    func send(_ datagram: [UInt8]) async throws {
+        _ = datagram
+        self.sendCountStorage += 1
+        if self.sendCountStorage >= self.failOnSendNumber {
+            throw self.sendError
+        }
+    }
+
+    func stop() async {
+        self.stopCountStorage += 1
+        self.continuation.finish()
     }
 
     func stopCount() -> Int {

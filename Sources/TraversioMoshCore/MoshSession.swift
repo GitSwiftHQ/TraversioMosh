@@ -347,7 +347,17 @@ public actor MoshSession {
         self.cancelMaintenanceTask()
         self.terminalEngine.enqueueClientOperation(operation)
         await runtime.setCurrentState(self.terminalEngine.clientState)
-        _ = try await self.sendDueDatagrams()
+        do {
+            _ = try await self.sendDueDatagrams()
+        } catch is CancellationError {
+            if self.isStarted, self.isStopped == false {
+                self.restartMaintenanceTask(runtime: runtime)
+            }
+            throw CancellationError()
+        } catch {
+            await self.finishFromClientUpdateFailure(throwing: error)
+            throw error
+        }
         guard self.isStarted, self.isStopped == false else {
             return
         }
@@ -462,6 +472,27 @@ public actor MoshSession {
         self.maintenanceTask?.cancel()
         self.maintenanceTask = nil
         await runtime.stop()
+        self.runtime = nil
+        self.hostOperationContinuation.finish(throwing: error)
+        self.renderOperationContinuation.finish(throwing: error)
+        self.finishStopWaiters(throwing: error)
+        self.diagnosticEventContinuation.yield(.stopped)
+        self.diagnosticEventContinuation.finish()
+    }
+
+    private func finishFromClientUpdateFailure(throwing error: Error) async {
+        guard self.isStopped == false else {
+            return
+        }
+
+        self.isStopped = true
+        self.isStarted = false
+        self.maintenanceGeneration &+= 1
+        self.receiveTask?.cancel()
+        self.receiveTask = nil
+        self.maintenanceTask?.cancel()
+        self.maintenanceTask = nil
+        await self.runtime?.stop()
         self.runtime = nil
         self.hostOperationContinuation.finish(throwing: error)
         self.renderOperationContinuation.finish(throwing: error)
