@@ -51,6 +51,12 @@ Use a custom `MoshSessionTransportFactory` only when the host app needs a
 test transport, packet capture, proxying, or a platform-specific datagram
 backend.
 
+Host apps that need Network.framework status UI should retain the
+`MoshNWDatagramLink` they create, or provide a small capturing factory, and
+consume `MoshNWDatagramLink.events` directly. `MoshNWSessionTransportFactory`
+is intentionally the default session adapter; it does not impose app-specific
+network status storage, logging, or UI policy.
+
 ## Lifecycle And Errors
 
 `MoshSession.start()` creates the datagram runtime, starts the injected

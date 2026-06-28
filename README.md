@@ -27,6 +27,8 @@ Network.framework UDP transport also exposes connection/path diagnostic events
 and a current path snapshot for host apps that need network status visibility.
 Host apps that want the default Network.framework UDP backend can use
 `MoshNWSessionTransportFactory` directly with `MoshSessionConfiguration`.
+Host apps that need Network.framework path/status events should provide or
+retain their own `MoshNWDatagramLink` through a custom factory.
 
 `MoshSession` exposes raw keystroke sending, raw default terminal-input
 sending, explicit-mode terminal-input translation for callers that own that
