@@ -88,6 +88,81 @@ struct MoshSessionTests {
     }
 
     @Test
+    func rapidResizeThenKeystrokeAfterHostOutputReachesServer() async throws {
+        let timing = MoshSSPSendTimingConfiguration(
+            sendIntervalMilliseconds: 20,
+            acknowledgementIntervalMilliseconds: 1_000,
+            activeRetryTimeoutMilliseconds: 1_000,
+            sendMinimumDelayMilliseconds: 0,
+            timeoutMilliseconds: 50
+        )
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24, timing: timing)
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 3)
+        let renderOperationTask = collectRenderOperations(from: fixture.session, count: 1)
+        let resizedDimensions = try MoshTerminalDimensions(columns: 100, rows: 30)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            let initialSendWait = try await withSessionTimeout {
+                try await fixture.timer.nextSleepRequest()
+            }
+            #expect(initialSendWait == 20)
+            await fixture.clock.advance(byMilliseconds: initialSendWait)
+            await fixture.timer.resumeNextSleep()
+
+            let idleWait = try await withSessionTimeout {
+                try await fixture.timer.nextSleepRequest()
+            }
+            #expect(idleWait == 1_000)
+
+            var hostState = MoshTerminalHostState()
+            hostState.append(.write(MoshTerminalOutput(bytes: Array("READY".utf8))))
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            let renderOperations = try await withSessionTimeout {
+                try await renderOperationTask.value
+            }
+            #expect(renderOperations == [.write(MoshTerminalOutput(bytes: Array("READY".utf8)))])
+
+            await fixture.clock.advance(byMilliseconds: 20)
+            try await fixture.session.resize(resizedDimensions)
+            try await fixture.session.sendKeystrokes([UInt8(ascii: "q")])
+
+            let delayedAckWait = try await withSessionTimeout {
+                try await fixture.timer.nextSleepRequest()
+            }
+            #expect(delayedAckWait == 100)
+            await fixture.clock.advance(byMilliseconds: delayedAckWait)
+            await fixture.timer.resumeNextSleep()
+
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let finalState = try #require(serverInstructions.last).instructionResult.latestState.state
+
+            #expect(
+                finalState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 80, rows: 24)),
+                    .resize(resizedDimensions),
+                    .keystrokes([UInt8(ascii: "q")]),
+                ]
+            )
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            serverInstructionTask.cancel()
+            renderOperationTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    @Test
     func terminalInputTranslatesSplitCursorKeySequenceBeforeClientState() async throws {
         let fixture = try await makeSessionFixture(columns: 80, rows: 24)
         let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 3)
