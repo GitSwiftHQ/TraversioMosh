@@ -1136,6 +1136,112 @@ struct MoshSessionTests {
             throw error
         }
     }
+
+    @Test
+    func cancelledShutdownWaiterLeavesSessionRunningUntilExplicitStop() async throws {
+        let timing = MoshSSPSendTimingConfiguration(
+            sendIntervalMilliseconds: 20,
+            acknowledgementIntervalMilliseconds: 1_000,
+            activeRetryTimeoutMilliseconds: 10_000,
+            sendMinimumDelayMilliseconds: 0,
+            timeoutMilliseconds: 1_000
+        )
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24, timing: timing)
+        let initialInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 1)
+        let hostCompletionTask = collectStreamFailure(from: fixture.session.hostOperations)
+        let renderCompletionTask = collectStreamFailure(from: fixture.session.renderOperations)
+        let diagnosticEventTask = collectEvents(from: fixture.session, count: 4)
+        var shutdownInstructionTask: Task<[MoshSSPDatagramIncomingInstruction<MoshTerminalClientState>], Error>?
+        var shutdownTask: Task<Void, Error>?
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            let initialSendWait = try await withSessionTimeout {
+                try await fixture.timer.nextSleepRequest()
+            }
+            #expect(initialSendWait == 20)
+            await fixture.clock.advance(byMilliseconds: initialSendWait)
+            let resumedInitialSend = await fixture.timer.resumeNextSleep(milliseconds: initialSendWait)
+            try #require(resumedInitialSend)
+
+            let initialInstructions = try await withSessionTimeout {
+                try await initialInstructionTask.value
+            }
+            let initialInstruction = try #require(initialInstructions.first)
+            #expect(initialInstruction.instructionResult.receiveResult == .accepted(newNumber: 1))
+
+            shutdownInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 1)
+            shutdownTask = Task {
+                try await fixture.session.shutdown()
+            }
+
+            let shutdownSendWait = try await nextSleepRequest(
+                from: fixture.timer,
+                matching: 20
+            )
+            await fixture.clock.advance(byMilliseconds: shutdownSendWait)
+            let resumedShutdownSend = await fixture.timer.resumeNextSleep(milliseconds: shutdownSendWait)
+            try #require(resumedShutdownSend)
+
+            let shutdownInstructionTask = try #require(shutdownInstructionTask)
+            let shutdownInstructions = try await withSessionTimeout {
+                try await shutdownInstructionTask.value
+            }
+            let shutdownInstruction = try #require(shutdownInstructions.first)
+            #expect(shutdownInstruction.instructionResult.receiveResult == .accepted(newNumber: UInt64.max))
+
+            let shutdownTask = try #require(shutdownTask)
+            shutdownTask.cancel()
+            do {
+                try await withSessionTimeout {
+                    try await shutdownTask.value
+                }
+                Issue.record("Expected cancelled shutdown to throw CancellationError.")
+            } catch is CancellationError {
+            } catch {
+                Issue.record("Expected CancellationError from cancelled shutdown, received \(error).")
+            }
+
+            await fixture.session.stop()
+
+            let diagnosticEvents = try await withSessionTimeout {
+                await diagnosticEventTask.value
+            }
+            let hostCompletion = try await withSessionTimeout {
+                await hostCompletionTask.value
+            }
+            let renderCompletion = try await withSessionTimeout {
+                await renderCompletionTask.value
+            }
+
+            #expect(diagnosticEvents == [
+                .started(fixture.endpoint),
+                .datagramsSent(packetCount: 1),
+                .datagramsSent(packetCount: 1),
+                .stopped,
+            ])
+            #expect(hostCompletion == nil)
+            #expect(renderCompletion == nil)
+            #expect(await fixture.timer.pendingSleepCount() == 0)
+            await expectSessionError(.stopped) {
+                try await fixture.session.sendKeystrokes([0x61])
+            }
+
+            await fixture.serverRuntime.stop()
+        } catch {
+            initialInstructionTask.cancel()
+            shutdownInstructionTask?.cancel()
+            shutdownTask?.cancel()
+            hostCompletionTask.cancel()
+            renderCompletionTask.cancel()
+            diagnosticEventTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
 }
 
 private struct MoshSessionFixture: Sendable {
