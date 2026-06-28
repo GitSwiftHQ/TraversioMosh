@@ -25,6 +25,8 @@ runtime, a public `MoshSession` facade, renderer-facing host operation streams,
 an internal terminal screen projection, and SSP graceful shutdown. The
 Network.framework UDP transport also exposes connection/path diagnostic events
 and a current path snapshot for host apps that need network status visibility.
+Host apps that want the default Network.framework UDP backend can use
+`MoshNWSessionTransportFactory` directly with `MoshSessionConfiguration`.
 
 `MoshSession` exposes raw keystroke sending, raw default terminal-input
 sending, explicit-mode terminal-input translation for callers that own that
@@ -32,9 +34,9 @@ adapter boundary, resize sending, graceful shutdown, async host operation and
 render operation streams, diagnostic events including typed screen projection
 failures, protocol snapshots, and a renderer-ready screen snapshot.
 
-The package is still under active compatibility work. Real `mosh-server`
-validation lives in the parent workspace matrix while protocol, roaming, and
-terminal-state coverage continue to expand.
+The package is still under active compatibility work. See
+[`Docs/Readiness.md`](Docs/Readiness.md) for the current host-app handoff,
+validation status, lifecycle semantics, and remaining completion gates.
 
 ## Products
 
@@ -47,6 +49,32 @@ terminal-state coverage continue to expand.
 - `TraversioMoshCrypto`: session-key validation and crypto boundary.
 - `TraversioMoshBootstrap`: `mosh-server` output parsing and an adapter protocol
   for SSH-backed bootstrap executors.
+
+## Minimal Session Setup
+
+Host applications own SSH login, host-key trust, remote command execution, and
+UI rendering. After running `mosh-server new` and parsing the connect line, the
+default Network.framework-backed session setup is:
+
+```swift
+let endpoint = MoshEndpoint(
+    host: host,
+    port: bootstrapResult.port,
+    sessionKey: bootstrapResult.sessionKey
+)
+
+let session = MoshSession(
+    configuration: MoshSessionConfiguration(
+        endpoint: endpoint,
+        initialTerminalDimensions: try MoshTerminalDimensions(columns: 80, rows: 24),
+        transportFactory: MoshNWSessionTransportFactory()
+    )
+)
+
+try await session.start()
+try await session.sendTerminalInput(Array("ls\n".utf8))
+await session.stop()
+```
 
 ## Package Requirements
 

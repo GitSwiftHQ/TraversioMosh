@@ -6,6 +6,8 @@
 import Testing
 import Foundation
 @preconcurrency import Network
+import TraversioMoshCore
+import TraversioMoshCrypto
 import TraversioMoshTransport
 
 struct MoshDatagramLinkTests {
@@ -117,6 +119,18 @@ struct MoshDatagramLinkTests {
         ) {
             try await link.start()
         }
+    }
+
+    @Test
+    func nwSessionTransportFactoryBuildsDefaultNWLink() async throws {
+        let sessionKey = try MoshSessionKey(rawBytes: Array(UInt8(0)..<UInt8(16)))
+        let endpoint = MoshEndpoint(host: "127.0.0.1", port: 60_001, sessionKey: sessionKey)
+        let factory = MoshNWSessionTransportFactory()
+
+        let link = try await factory.makeDatagramLink(for: endpoint)
+        let nwLink = try #require(link as? MoshNWDatagramLink)
+
+        await nwLink.stop()
     }
 
     @Test
