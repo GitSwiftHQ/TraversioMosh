@@ -80,10 +80,69 @@ struct MoshProtobufTests {
     }
 
     @Test
-    func rejectsUnsupportedWireType() {
-        #expect(throws: MoshProtobufError.unsupportedWireType(3)) {
+    func skipsUnknownGroupEncodedField() throws {
+        // Field 100 start-group, a nested varint field, matching end-group,
+        // then the known field 3 (newNumber = 7). The group must be skipped and
+        // parsing must continue to the trailing known field.
+        let bytes = hex("A3060805A4061807")
+        let instruction = try MoshTransportInstruction(serializedBytes: bytes)
+
+        #expect(instruction.newNumber == 7)
+    }
+
+    @Test
+    func rejectsUnmatchedEndGroupTag() {
+        // Field 100 end-group (wire type 4) with no enclosing start-group.
+        #expect(throws: MoshProtobufError.unsupportedWireType(4)) {
+            _ = try MoshTransportInstruction(serializedBytes: hex("A406"))
+        }
+    }
+
+    @Test
+    func rejectsUnterminatedGroup() {
+        // Start-group with no matching end-group must fail (not crash / not
+        // silently accept).
+        #expect(throws: MoshProtobufError.truncated) {
             _ = try MoshTransportInstruction(serializedBytes: hex("A306"))
         }
+    }
+
+    @Test
+    func rejectsLengthVarintExceedingIntMax() {
+        // Field 6 (diff, wire type 2) with a length varint of 2^63 (Int.max + 1).
+        // A trapping Int(UInt64) narrowing would crash the process here; the
+        // bounds guard must instead throw before any Int conversion.
+        #expect(throws: MoshProtobufError.truncated) {
+            _ = try MoshTransportInstruction(serializedBytes: hex("3280808080808080808001"))
+        }
+    }
+
+    @Test
+    func rejectsOverlongNonCanonicalVarint() {
+        // Field 2 (oldNumber, wire type 0) with a 10-byte varint whose final
+        // byte sets payload bits beyond bit 63 (0x02 -> bit 1). Those bits
+        // cannot fit a UInt64 and were previously dropped silently.
+        #expect(throws: MoshProtobufError.malformedVarint) {
+            _ = try MoshTransportInstruction(serializedBytes: hex("1080808080808080808002"))
+        }
+    }
+
+    @Test
+    func resizeRoundTripsNegativeInt32Dimensions() throws {
+        // proto2 int32 resize dimensions must survive the sign-extended 10-byte
+        // varint form a conformant peer sends for negative values.
+        let message = MoshClientMessage(instructions: [
+            MoshClientInstruction(resize: MoshTerminalSize(columns: -1, rows: -2)),
+        ])
+
+        let bytes = message.serializedBytes()
+        let decoded = try MoshClientMessage(serializedBytes: bytes)
+
+        #expect(decoded == message)
+        #expect(decoded.instructions.first?.resize == MoshTerminalSize(columns: -1, rows: -2))
+        // width -1 must serialize as the canonical sign-extended 10-byte varint.
+        #expect(bytes.contains(where: { $0 == 0x28 }))
+        #expect(bytes.filter { $0 == 0xff }.count >= 9)
     }
 
     @Test

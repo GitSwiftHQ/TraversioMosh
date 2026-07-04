@@ -180,8 +180,11 @@ public struct MoshClientInstruction: Equatable, Sendable {
 
     fileprivate static func serializedResize(_ resize: MoshTerminalSize) -> [UInt8] {
         var writer = ProtobufWriter()
-        writer.appendVarint(fieldNumber: 5, value: UInt64(UInt32(bitPattern: resize.columns)))
-        writer.appendVarint(fieldNumber: 6, value: UInt64(UInt32(bitPattern: resize.rows)))
+        // proto2 int32: sign-extend to 64 bits so negative dimensions encode as
+        // the canonical 10-byte varint a conformant peer expects. Non-negative
+        // values still encode in <= 5 bytes (identical to the prior encoding).
+        writer.appendVarint(fieldNumber: 5, value: UInt64(bitPattern: Int64(resize.columns)))
+        writer.appendVarint(fieldNumber: 6, value: UInt64(bitPattern: Int64(resize.rows)))
         return writer.bytes
     }
 
@@ -193,9 +196,9 @@ public struct MoshClientInstruction: Equatable, Sendable {
         while let field = try reader.nextField() {
             switch field.number {
             case 5:
-                columns = Int32(bitPattern: try reader.readUInt32(field: field))
+                columns = try reader.readInt32(field: field)
             case 6:
-                rows = Int32(bitPattern: try reader.readUInt32(field: field))
+                rows = try reader.readInt32(field: field)
             default:
                 try reader.skip(field: field)
             }
@@ -414,6 +417,15 @@ private struct ProtobufReader {
 
             let byte = self.bytes[self.offset]
             self.offset += 1
+
+            // The 10th byte (shift == 63) of a base-128 varint may only carry
+            // bit 63. Payload bits 1–6 would map to bit positions 64–69, which
+            // do not exist in a UInt64. Accepting them would silently drop those
+            // bits (a non-canonical, lossy encoding), so reject them instead.
+            if shift == 63, (byte & 0x7e) != 0 {
+                throw MoshProtobufError.malformedVarint
+            }
+
             result |= UInt64(byte & 0x7f) << shift
 
             if (byte & 0x80) == 0 {
@@ -424,6 +436,14 @@ private struct ProtobufReader {
         }
 
         throw MoshProtobufError.malformedVarint
+    }
+
+    mutating func readInt32(field: ProtobufField) throws -> Int32 {
+        // proto2 int32 is transmitted as a full-width 64-bit varint; negative
+        // values arrive sign-extended to 10 bytes. Truncate to the low 32 bits
+        // and reinterpret as two's-complement Int32.
+        let value = try self.readVarint(field: field)
+        return Int32(truncatingIfNeeded: value)
     }
 
     mutating func readVarint(field: ProtobufField) throws -> UInt64 {
@@ -445,15 +465,23 @@ private struct ProtobufReader {
     }
 
     private mutating func readLengthDelimited() throws -> [UInt8] {
-        let length = Int(try self.readVarint())
-        guard self.offset + length <= self.bytes.count else {
+        // Keep the declared length as UInt64 and bounds-check it against the
+        // remaining byte count BEFORE any Int conversion. A trapping
+        // `Int(UInt64)` here would crash the process on a length > Int.max sent
+        // by a peer. `remaining` is a non-negative Int (offset <= count), so a
+        // length that survives the guard is provably <= Int.max and safe to
+        // narrow.
+        let length = try self.readVarint()
+        let remaining = UInt64(self.bytes.count - self.offset)
+        guard length <= remaining else {
             throw MoshProtobufError.truncated
         }
 
+        let count = Int(length)
         defer {
-            self.offset += length
+            self.offset += count
         }
-        return Array(self.bytes[self.offset..<(self.offset + length)])
+        return Array(self.bytes[self.offset..<(self.offset + count)])
     }
 
     mutating func skip(field: ProtobufField) throws {
@@ -464,11 +492,31 @@ private struct ProtobufReader {
             try self.skipBytes(8)
         case 2:
             _ = try self.readLengthDelimited()
+        case 3:
+            // Start-group: recursively skip fields up to the matching end-group.
+            try self.skipGroup(fieldNumber: field.number)
         case 5:
             try self.skipBytes(4)
         default:
+            // Includes wire type 4 (end-group) encountered without a matching
+            // start-group, which is malformed.
             throw MoshProtobufError.unsupportedWireType(field.wireType)
         }
+    }
+
+    private mutating func skipGroup(fieldNumber: Int) throws {
+        while let field = try self.nextField() {
+            if field.wireType == 4 {
+                guard field.number == fieldNumber else {
+                    // Mismatched end-group tag is malformed.
+                    throw MoshProtobufError.unsupportedWireType(field.wireType)
+                }
+                return
+            }
+            try self.skip(field: field)
+        }
+        // Ran out of bytes before the matching end-group.
+        throw MoshProtobufError.truncated
     }
 
     private func requireWireType(_ expected: Int, field: ProtobufField) throws {

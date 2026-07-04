@@ -16,7 +16,11 @@ public enum MoshCompressionError: Error, Equatable, Sendable {
 }
 
 public struct MoshCompressor: Sendable {
-    public static let defaultMaximumOutputByteCount = 2 * 1024 * 1024
+    // Matches the reference peer's terminal-size ceiling (mosh compressor.h
+    // BUFFER_SIZE = 2048 * 2048 = 4 MiB). A conformant server can emit a 2–4
+    // MiB inflated instruction for a large full-screen redraw; a lower cap would
+    // reject it and break the session. The cap still bounds zlib-bomb output.
+    public static let defaultMaximumOutputByteCount = 2048 * 2048
 
     public init() {}
 

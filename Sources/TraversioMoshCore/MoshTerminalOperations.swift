@@ -11,14 +11,25 @@ public enum MoshTerminalOperationError: Error, Equatable, Sendable {
 }
 
 public struct MoshTerminalDimensions: Equatable, Sendable {
+    /// Upper bound on a single terminal dimension.
+    ///
+    /// A resize instruction is peer-controlled, and `MoshTerminalScreen`
+    /// allocates a cell grid of `columns * rows`. Without a ceiling a malicious
+    /// `resize` (e.g. `Int32.max` columns) forces an OOM-scale allocation. 1000
+    /// comfortably exceeds any real display (well past 8K-wide multi-monitor
+    /// layouts) while bounding the grid to at most 1_000_000 cells, so it is a
+    /// safe interop cap. Values above the bound are rejected, not clamped, so a
+    /// caller never silently renders at the wrong size.
+    public static let maximumDimension: Int32 = 1000
+
     public let columns: Int32
     public let rows: Int32
 
     public init(columns: Int32, rows: Int32) throws {
-        guard columns > 0 else {
+        guard columns > 0, columns <= Self.maximumDimension else {
             throw MoshTerminalOperationError.invalidColumnCount(columns)
         }
-        guard rows > 0 else {
+        guard rows > 0, rows <= Self.maximumDimension else {
             throw MoshTerminalOperationError.invalidRowCount(rows)
         }
 

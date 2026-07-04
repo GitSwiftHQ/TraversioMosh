@@ -170,6 +170,37 @@ struct MoshTerminalStateTests {
     }
 
     @Test
+    func dimensionsRejectValuesAboveMaximum() {
+        let tooWide = MoshTerminalDimensions.maximumDimension + 1
+        // Value at the cap is accepted; one above it is rejected (not clamped).
+        #expect(throws: Never.self) {
+            _ = try MoshTerminalDimensions(
+                columns: MoshTerminalDimensions.maximumDimension,
+                rows: MoshTerminalDimensions.maximumDimension
+            )
+        }
+        #expect(throws: MoshTerminalOperationError.invalidColumnCount(tooWide)) {
+            _ = try MoshTerminalDimensions(columns: tooWide, rows: 24)
+        }
+        #expect(throws: MoshTerminalOperationError.invalidRowCount(tooWide)) {
+            _ = try MoshTerminalDimensions(columns: 80, rows: tooWide)
+        }
+    }
+
+    @Test
+    func operationDecodingRejectsOversizedWireResizeDimensions() {
+        // A malicious server resize of 2^31-1 must be rejected before any
+        // grid allocation, not accepted as an unbounded dimension.
+        let hostMessage = MoshHostMessage(instructions: [
+            MoshHostInstruction(resize: MoshTerminalSize(columns: Int32.max, rows: 24)),
+        ])
+
+        #expect(throws: MoshTerminalOperationError.invalidColumnCount(Int32.max)) {
+            _ = try MoshHostOperation.operations(from: hostMessage)
+        }
+    }
+
+    @Test
     func operationDecodingRejectsInvalidWireResizeDimensions() {
         let clientMessage = MoshClientMessage(instructions: [
             MoshClientInstruction(resize: MoshTerminalSize(columns: 0, rows: 24)),

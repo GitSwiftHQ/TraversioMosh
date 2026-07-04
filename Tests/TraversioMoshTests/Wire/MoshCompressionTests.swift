@@ -77,6 +77,29 @@ struct MoshCompressionTests {
     }
 
     @Test
+    func decompressesUpToOfficialTerminalCeiling() throws {
+        // The default cap must match the reference peer's terminal-size ceiling
+        // (compressor.h BUFFER_SIZE = 2048 * 2048 = 4 MiB) so a large
+        // full-screen redraw inflating to 2–4 MiB still decodes.
+        let ceiling = 2048 * 2048
+        #expect(MoshCompressor.defaultMaximumOutputByteCount == ceiling)
+
+        let compressor = MoshCompressor()
+        let input = [UInt8](repeating: 0x41, count: ceiling)
+        let compressed = try compressor.compress(input)
+
+        // Boundary: an output of exactly the ceiling decodes under the default cap.
+        let decompressed = try compressor.decompress(compressed)
+        #expect(decompressed.count == ceiling)
+        #expect(decompressed == input)
+
+        // The previous 2 MiB cap was too small for this conformant payload.
+        #expect(throws: MoshCompressionError.outputLimitExceeded) {
+            _ = try compressor.decompress(compressed, maximumOutputByteCount: 2 * 1024 * 1024)
+        }
+    }
+
+    @Test
     func rejectsNegativeOutputLimit() {
         let compressor = MoshCompressor()
 
