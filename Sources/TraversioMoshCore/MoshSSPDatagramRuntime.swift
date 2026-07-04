@@ -92,7 +92,7 @@ public actor MoshSSPDatagramRuntime<
 
     public init(
         loop: MoshSSPInMemoryLoop<SendState, ReceiveState>,
-        sequencer: MoshDatagramSequencer,
+        sequencer: consuming MoshDatagramSequencer,
         link: any MoshDatagramLink,
         clock: any MoshMillisecondsClock = MoshSystemMillisecondsClock(),
         bufferingPolicy: IncomingInstructionStream.Continuation.BufferingPolicy = .bufferingNewest(256)
@@ -292,7 +292,7 @@ public actor MoshSSPDatagramRuntime<
             switch error {
             case .directionMismatch:
                 return true
-            case .sendSequenceExhausted:
+            case .sendSequenceExhausted, .blockEncryptionLimitReached:
                 return false
             }
         default:

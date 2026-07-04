@@ -63,4 +63,76 @@ struct MoshSessionKeyTests {
             _ = try MoshSessionKey(rawBytes: bytes)
         }
     }
+
+    // MARK: - Zeroization
+
+    @Test
+    func wipeZeroesTheKeyBytes() throws {
+        let key = try MoshSessionKey(rawBytes: Array(UInt8(1)..<UInt8(17)))
+
+        key.wipe()
+
+        #expect(key.rawBytes == [UInt8](repeating: 0, count: MoshSessionKey.byteCount))
+    }
+
+    @Test
+    func wipeAffectsAllValuesSharingReferenceBackedStorage() throws {
+        let key = try MoshSessionKey(rawBytes: Array(UInt8(1)..<UInt8(17)))
+        // A struct copy shares the same wipeable buffer.
+        let alias = key
+
+        alias.wipe()
+
+        // Wiping through one value zeroes the other: the storage is shared.
+        #expect(key.rawBytes == [UInt8](repeating: 0, count: MoshSessionKey.byteCount))
+        #expect(alias.rawBytes == [UInt8](repeating: 0, count: MoshSessionKey.byteCount))
+    }
+
+    @Test
+    func independentlyConstructedKeysDoNotShareStorage() throws {
+        let bytes = Array(UInt8(1)..<UInt8(17))
+        let first = try MoshSessionKey(rawBytes: bytes)
+        let second = try MoshSessionKey(rawBytes: bytes)
+
+        first.wipe()
+
+        // A separately constructed key keeps its own material.
+        #expect(second.rawBytes == bytes)
+    }
+
+    // MARK: - Redaction (never leak key bytes into logs)
+
+    @Test
+    func descriptionAndDebugDescriptionAreRedacted() throws {
+        let rawBytes = Array(UInt8(0x41)..<UInt8(0x51))
+        let key = try MoshSessionKey(rawBytes: rawBytes)
+
+        let described = "\(key)"
+        let reflected = String(reflecting: key)
+
+        #expect(described == "MoshSessionKey(<redacted>)")
+        #expect(reflected == "MoshSessionKey(<redacted>)")
+
+        // The raw bytes and their canonical encoding must never appear.
+        let rawHex = rawBytes.map { String(format: "%02x", $0) }.joined()
+        #expect(described.contains(rawHex) == false)
+        #expect(reflected.contains(rawHex) == false)
+        #expect(described.contains(key.encodedRepresentation) == false)
+        #expect(reflected.contains(key.encodedRepresentation) == false)
+    }
+
+    @Test
+    func redactionPropagatesThroughAContainingType() throws {
+        struct Carrier {
+            let label: String
+            let key: MoshSessionKey
+        }
+        let key = try MoshSessionKey(rawBytes: Array(UInt8(0x41)..<UInt8(0x51)))
+        let carrier = Carrier(label: "session", key: key)
+
+        let reflected = String(reflecting: carrier)
+
+        #expect(reflected.contains("<redacted>"))
+        #expect(reflected.contains(key.encodedRepresentation) == false)
+    }
 }
