@@ -18,6 +18,20 @@ public struct MoshEndpoint: Equatable, Sendable {
     }
 }
 
+extension MoshEndpoint: CustomStringConvertible, CustomDebugStringConvertible {
+    /// Never renders the session key. Only the non-secret host and port are shown
+    /// so that logging or string interpolation of an endpoint cannot leak key
+    /// material. Complements `MoshSessionKey`'s own redaction.
+    public var description: String {
+        "MoshEndpoint(host: \(self.host), port: \(self.port), sessionKey: <redacted>)"
+    }
+
+    /// Never renders the session key, including via `String(reflecting:)`.
+    public var debugDescription: String {
+        self.description
+    }
+}
+
 public protocol MoshSessionTransportFactory: Sendable {
     func makeDatagramLink(for endpoint: MoshEndpoint) async throws -> any MoshDatagramLink
 }
@@ -110,10 +124,18 @@ public struct MoshSessionScreenProjectionFailure: Error, Equatable, Sendable {
 }
 
 public enum MoshSessionEvent: Equatable, Sendable {
-    case started(MoshEndpoint)
+    /// The session started against the given host and port. Deliberately carries
+    /// only the non-secret endpoint summary (not the live `MoshSessionKey`), so a
+    /// diagnostic-stream consumer never holds or renders key material.
+    case started(host: String, port: UInt16)
     case datagramsSent(packetCount: Int)
     case hostStateReceived(number: UInt64, operationCount: Int)
     case screenProjectionFailed(MoshSessionScreenProjectionFailure)
+    /// The peer (server) initiated shutdown: it sent the shutdown-sentinel state
+    /// number and we have adopted it as our latest received state. The session
+    /// then finishes its streams cleanly. Distinct from `.stopped`, which is the
+    /// generic terminal event for any stop path.
+    case peerShutdown
     case stopped
 }
 
@@ -247,7 +269,12 @@ public actor MoshSession {
             self.runtime = runtime
             self.isStarted = true
             self.startReceiveTask(runtime: runtime)
-            self.diagnosticEventContinuation.yield(.started(self.configuration.endpoint))
+            self.diagnosticEventContinuation.yield(
+                .started(
+                    host: self.configuration.endpoint.host,
+                    port: self.configuration.endpoint.port
+                )
+            )
             _ = try await self.sendDueDatagrams()
             self.restartMaintenanceTask(runtime: runtime)
         } catch {
@@ -424,7 +451,24 @@ public actor MoshSession {
         self.diagnosticEventContinuation.yield(
             .hostStateReceived(number: state.number, operationCount: operations.count)
         )
+        // Detect a counterparty (server) shutdown. Official Mosh recognizes this
+        // when the server sends the shutdown-sentinel state number (`uint64_t(-1)`),
+        // which the receiver adopts as its latest state so `sender.set_ack_num`
+        // records `uint64_t(-1)`; the client then acknowledges once and exits
+        // cleanly (`stmclient.cc` ~531-533, `counterparty_shutdown_ack_sent`). We
+        // mirror this without inventing wire behavior: the receiver's
+        // acknowledgement number becoming `UInt64.max` means our latest received
+        // state IS that shutdown sentinel. We render the final adopted state above
+        // first (as official does before breaking its loop), then finish the
+        // host/render streams cleanly so `hostOperations` consumers do not hang.
+        let counterpartyInitiatedShutdown =
+            instruction.instructionResult.acknowledgementNumber == Self.shutdownSentinelStateNumber
         if let runtime = self.runtime, self.isStarted, self.isStopped == false {
+            if counterpartyInitiatedShutdown {
+                self.diagnosticEventContinuation.yield(.peerShutdown)
+                await self.stop()
+                return
+            }
             if await runtime.shutdownAcknowledged() {
                 await self.stop()
                 return
@@ -432,6 +476,11 @@ public actor MoshSession {
             self.restartMaintenanceTask(runtime: runtime)
         }
     }
+
+    /// The wire state number a peer sends to signal shutdown (`uint64_t(-1)` in
+    /// official Mosh). When our receiver's acknowledgement number reaches this
+    /// value, the peer has initiated shutdown.
+    private static var shutdownSentinelStateNumber: UInt64 { UInt64.max }
 
     private func finishFromReceiveTask(throwing error: Error?) async {
         guard self.isStopped == false else {

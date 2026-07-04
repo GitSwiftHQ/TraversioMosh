@@ -181,19 +181,33 @@ public struct MoshSSPInMemoryLoop<
 
     public mutating func receive(
         _ packet: MoshPacketPlaintext,
-        nowMilliseconds: UInt64
+        nowMilliseconds: UInt64,
+        isInSequenceOrder: Bool = true
     ) throws -> MoshSSPIncomingPacketResult<ReceiveState> {
-        if packet.timestamp != Self.packetTimestampNoReply {
-            self.pendingTimestampReply = PendingTimestampReply(
-                timestamp: packet.timestamp,
-                receivedAtMilliseconds: nowMilliseconds
+        // Connection-level timestamp, RTT, and last-heard state may only advance
+        // for an in-sequence datagram. This mirrors official Mosh
+        // `Connection::recv_one` (network/network.cc ~482-524): when a datagram's
+        // seq is below `expected_receiver_seq` it "don't use (but do return)
+        // out-of-order packets for timestamp or targeting" and returns the payload
+        // before touching `saved_timestamp`, the RTT estimator, or `last_heard`.
+        // Skipping these is security-sensitive: a replayed datagram must not be
+        // able to move the timestamp/RTT estimators. The transport-level work
+        // below (ack processing, state application) is idempotent by state number
+        // and still runs, exactly as official's `Transport::recv` does for the
+        // returned out-of-order payload.
+        if isInSequenceOrder {
+            if packet.timestamp != Self.packetTimestampNoReply {
+                self.pendingTimestampReply = PendingTimestampReply(
+                    timestamp: packet.timestamp,
+                    receivedAtMilliseconds: nowMilliseconds
+                )
+            }
+            self.scheduler.processPacketTimestampReply(
+                packet.timestampReply,
+                nowMilliseconds: nowMilliseconds
             )
+            self.scheduler.noteRemoteHeard(nowMilliseconds: nowMilliseconds)
         }
-        self.scheduler.processPacketTimestampReply(
-            packet.timestampReply,
-            nowMilliseconds: nowMilliseconds
-        )
-        self.scheduler.noteRemoteHeard(nowMilliseconds: nowMilliseconds)
 
         let fragment = try MoshFragment(serializedBytes: packet.payload)
         guard let instruction = try self.assembly.add(fragment) else {
@@ -209,8 +223,17 @@ public struct MoshSSPInMemoryLoop<
 
         let receiveResult = try self.receiver.receive(instruction, nowMilliseconds: nowMilliseconds)
         if self.receiver.acknowledgementNumber == instruction.newNumber {
+            // Official Mosh (`network/networktransport-impl.h` recv ~168-173)
+            // always `set_ack_num` when a state is appended at the back but only
+            // `set_data_ack` `if ( !inst.diff().empty() )`. An empty-diff
+            // heartbeat therefore advances the ack number without arming the
+            // delayed data-acknowledgement; otherwise two instances trade empty
+            // acks forever, because each empty ack mints a fresh state number
+            // that the peer would then delay-ack in turn.
+            let hadNonEmptyDiff = (instruction.diff?.isEmpty == false)
             self.scheduler.noteReceivedState(
                 number: self.receiver.acknowledgementNumber,
+                hadNonEmptyDiff: hadNonEmptyDiff,
                 nowMilliseconds: nowMilliseconds
             )
         }
@@ -233,7 +256,12 @@ public struct MoshSSPInMemoryLoop<
     }
 
     private static func packetTimestamp(for nowMilliseconds: UInt64) -> UInt16 {
-        UInt16(truncatingIfNeeded: nowMilliseconds)
+        // Never emit 0xFFFF as a live timestamp: that value is the "no timestamp"
+        // marker on the wire. Mirrors official Mosh `Network::timestamp16`
+        // (network/network.cc ~570-577), which does `if ( ts == uint16_t( -1 ) )
+        // ts++;`, wrapping 0xFFFF to 0x0000.
+        let truncated = UInt16(truncatingIfNeeded: nowMilliseconds)
+        return truncated == Self.packetTimestampNoReply ? truncated &+ 1 : truncated
     }
 
     private mutating func consumeTimestampReply(nowMilliseconds: UInt64) -> UInt16 {

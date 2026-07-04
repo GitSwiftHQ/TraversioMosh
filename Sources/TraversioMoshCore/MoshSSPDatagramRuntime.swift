@@ -65,7 +65,6 @@ public struct MoshSSPDatagramIncomingInstruction<ReceiveState: MoshSynchronizedS
 }
 
 public enum MoshSSPDatagramIncomingPacketResult<ReceiveState: MoshSynchronizedState>: Equatable, Sendable {
-    case replayedDatagram(MoshReceivedDatagram)
     case incompleteFragment(receivedDatagram: MoshReceivedDatagram, packet: MoshPacketPlaintext)
     case instruction(MoshSSPDatagramIncomingInstruction<ReceiveState>)
 }
@@ -191,15 +190,33 @@ public actor MoshSSPDatagramRuntime<
         try self.requireStarted()
 
         let receivedDatagram = try self.sequencer.open(datagram: datagram)
-        if case .replayed = receivedDatagram.sequenceStatus {
-            return .replayedDatagram(receivedDatagram)
+        // `sequencer.open` has already authenticated the datagram (OCB) and
+        // verified its direction; a `.replayed` status means only that the
+        // sequence number is below the expected next sequence (an authentic but
+        // out-of-order/duplicate datagram). Official Mosh still delivers such a
+        // packet's payload to the transport so a reordered fragment can complete
+        // its instruction ("don't use (but do return) out-of-order packets",
+        // network/network.cc), and the sequencer has already declined to advance
+        // its replay window, so delivering the plaintext opens no replay hole.
+        // We only suppress the connection-level timestamp/RTT/heard updates for
+        // an out-of-order datagram by passing `isInSequenceOrder: false`.
+        let isInSequenceOrder: Bool
+        switch receivedDatagram.sequenceStatus {
+        case .new:
+            isInSequenceOrder = true
+        case .replayed:
+            isInSequenceOrder = false
         }
 
         let packet = try MoshPacketPlaintext(
             serializedBytes: receivedDatagram.openedDatagram.plaintext
         )
         let nowMilliseconds = await self.clock.nowMilliseconds()
-        let packetResult = try self.loop.receive(packet, nowMilliseconds: nowMilliseconds)
+        let packetResult = try self.loop.receive(
+            packet,
+            nowMilliseconds: nowMilliseconds,
+            isInSequenceOrder: isInSequenceOrder
+        )
 
         switch packetResult {
         case .incompleteFragment:

@@ -85,8 +85,16 @@ struct MoshSSPDatagramRuntimeTests {
         }
     }
 
+    // A replayed (seq < expected) datagram is authentic — it passed OCB
+    // authentication and the direction check in the sequencer — so it is still
+    // delivered to the SSP loop rather than dropped before assembly. Because SSP
+    // numbers its states, re-delivering an already-seen instruction is idempotent:
+    // the receiver dedups it (`.duplicate`) and the latest state is unchanged.
+    // This proves delivery without opening a replay hole. (Regression: this test
+    // previously asserted the buggy behavior that a replayed datagram was
+    // classified and dropped before packet assembly.)
     @Test
-    func replayedDatagramIsClassifiedBeforePacketAssembly() async throws {
+    func replayedDatagramIsDeliveredButDedupedByStateNumber() async throws {
         let pair = await MoshInMemoryDatagramLink.connectedPair()
         let clock = ManualMillisecondsClock()
         let runtime = try makeRuntime(
@@ -125,13 +133,97 @@ struct MoshSSPDatagramRuntimeTests {
             #expect(await runtime.latestReceivedState().state.bytes == [0x41])
 
             let replayResult = try await runtime.receiveDatagram(datagram)
+            let replayInstruction = try requireRuntimeInstruction(replayResult)
 
-            guard case .replayedDatagram(let replay) = replayResult else {
-                Issue.record("Expected replayed datagram classification.")
+            #expect(replayInstruction.receivedDatagram.sequenceStatus == .replayed(expectedNextSequence: 1))
+            #expect(replayInstruction.instructionResult.receiveResult == .duplicate(newNumber: 1))
+            #expect(await runtime.latestReceivedState().state.bytes == [0x41])
+
+            await runtime.stop()
+        } catch {
+            await runtime.stop()
+            throw error
+        }
+    }
+
+    // A two-fragment instruction whose datagrams arrive in reverse sequence order
+    // must still assemble. The final fragment (higher datagram seq) arrives first
+    // and advances the sequencer's expected sequence; the earlier fragment then
+    // arrives as `.replayed` (seq < expected). The fix delivers that out-of-order
+    // datagram's plaintext to the loop so the fragment assembler completes the
+    // instruction instead of stalling until a retransmit.
+    @Test
+    func reorderedFragmentsAssembleWhenEarlierDatagramArrivesLast() async throws {
+        let pair = await MoshInMemoryDatagramLink.connectedPair()
+        let clock = ManualMillisecondsClock()
+        let runtime = try makeRuntime(
+            link: pair.server,
+            clock: clock,
+            sendDirection: .toClient,
+            receiveDirection: .toServer
+        )
+        var senderSequencer = try MoshDatagramSequencer(
+            rawKey: runtimeKey,
+            sendDirection: .toServer,
+            receiveDirection: .toClient
+        )
+
+        do {
+            try await runtime.start()
+
+            // Build a single instruction that spans two fragments. A deterministic,
+            // low-compressibility diff plus a tiny fragment capacity guarantees the
+            // instruction fragments into more than one datagram.
+            var fragmenter = MoshFragmenter()
+            let diffBytes = (0..<200).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) }
+            let instruction = MoshTransportInstruction(
+                protocolVersion: 2,
+                oldNumber: 0,
+                newNumber: 1,
+                acknowledgementNumber: 0,
+                throwawayNumber: 0,
+                diff: diffBytes,
+                chaff: []
+            )
+            let fragments = try fragmenter.makeFragments(
+                for: instruction,
+                maximumSerializedFragmentByteCount: MoshFragment.headerByteCount + 7
+            )
+            #expect(fragments.count >= 2)
+
+            // Seal each fragment in fragment order, so fragment 0 rides the lower
+            // datagram sequence and the final fragment rides the higher one.
+            let datagrams = try fragments.map { fragment -> [UInt8] in
+                let plaintext = MoshPacketPlaintext(
+                    timestamp: 20,
+                    timestampReply: UInt16.max,
+                    payload: fragment.serializedBytes()
+                )
+                return try senderSequencer.seal(plaintext: plaintext.serializedBytes())
+            }
+
+            await clock.set(20)
+
+            // Deliver in reverse datagram-sequence order: final fragment first.
+            var completed: MoshSSPDatagramIncomingInstruction<ByteState>?
+            for datagram in datagrams.reversed() {
+                let result = try await runtime.receiveDatagram(datagram)
+                if case .instruction(let delivered) = result {
+                    completed = delivered
+                }
+            }
+
+            let deliveredInstruction = try #require(completed)
+            #expect(deliveredInstruction.instructionResult.receiveResult == .accepted(newNumber: 1))
+            #expect(await runtime.latestReceivedState().state.bytes == diffBytes)
+            // The instruction completed on an out-of-order (earlier) datagram; its
+            // replayed sequence status is preserved on the yielded instruction,
+            // confirming assembly finished on an out-of-sequence delivery rather
+            // than on the leading in-order datagram.
+            guard case .replayed = deliveredInstruction.receivedDatagram.sequenceStatus else {
+                Issue.record("Expected the completing datagram to be out of order.")
                 throw RuntimeTestFailure()
             }
-            #expect(replay.sequenceStatus == .replayed(expectedNextSequence: 1))
-            #expect(await runtime.latestReceivedState().state.bytes == [0x41])
 
             await runtime.stop()
         } catch {

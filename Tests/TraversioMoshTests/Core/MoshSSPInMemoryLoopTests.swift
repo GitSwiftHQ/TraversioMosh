@@ -235,6 +235,72 @@ struct MoshSSPInMemoryLoopTests {
         #expect(result.latestState == MoshNumberedState(number: 0, state: ByteState()))
     }
 
+    // The outgoing packet timestamp must never be 0xFFFF, which is the wire's
+    // "no timestamp" marker. Official Mosh `timestamp16` wraps it to 0.
+    @Test
+    func outgoingTimestampNeverEqualsNoTimestampSentinel() throws {
+        var loop = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+            chaffSource: .none
+        )
+
+        // 65_535 truncates to 0xFFFF in 16 bits, which would otherwise collide
+        // with the "no timestamp" sentinel.
+        loop.setCurrentState(ByteState([1]), nowMilliseconds: 0)
+        let batch = try #require(try loop.tick(nowMilliseconds: 65_535))
+        let packet = try #require(batch.packets.first)
+
+        #expect(packet.plaintext.timestamp != UInt16.max)
+        #expect(packet.plaintext.timestamp == 0)
+    }
+
+    // A non-empty-diff state arms the delayed data-acknowledgement (official
+    // Mosh `set_data_ack()` gated on `!inst.diff().empty()`), pulling the next
+    // acknowledgement forward to now + 100ms. An empty-diff heartbeat updates the
+    // ack number but must NOT arm the delayed data-ack, otherwise two instances
+    // trade empty acks forever.
+    @Test
+    func emptyDiffHeartbeatDoesNotArmDelayedDataAcknowledgement() throws {
+        var dataLoop = makeReceivingLoop()
+        let dataInstruction = MoshTransportInstruction(
+            protocolVersion: 2,
+            oldNumber: 0,
+            newNumber: 1,
+            acknowledgementNumber: 0,
+            throwawayNumber: 0,
+            diff: [0x41],
+            chaff: []
+        )
+        _ = try requireInstruction(
+            try dataLoop.receive(singleFragmentPacket(for: dataInstruction), nowMilliseconds: 10)
+        )
+        // Delayed data-ack armed: next wakeup is the 100ms acknowledgement delay.
+        #expect(try dataLoop.waitTime(nowMilliseconds: 10) == 100)
+
+        var heartbeatLoop = makeReceivingLoop()
+        let heartbeatInstruction = MoshTransportInstruction(
+            protocolVersion: 2,
+            oldNumber: 0,
+            newNumber: 1,
+            acknowledgementNumber: 0,
+            throwawayNumber: 0,
+            diff: [],
+            chaff: []
+        )
+        _ = try requireInstruction(
+            try heartbeatLoop.receive(singleFragmentPacket(for: heartbeatInstruction), nowMilliseconds: 10)
+        )
+        // No delayed data-ack: next wakeup stays on the idle 3000ms interval.
+        #expect(try heartbeatLoop.waitTime(nowMilliseconds: 10) == 2_990)
+
+        // The ack number is still updated for the heartbeat: when the idle
+        // interval fires, the emitted acknowledgement carries the new state number.
+        let heartbeatAcknowledgement = try #require(try heartbeatLoop.tick(nowMilliseconds: 3_000))
+        #expect(heartbeatAcknowledgement.instruction.acknowledgementNumber == 1)
+    }
+
     @Test
     func shutdownAcknowledgementPrunesSenderThroughMaximumState() throws {
         var client = MoshSSPInMemoryLoop(
@@ -270,6 +336,32 @@ struct MoshSSPInMemoryLoopTests {
         #expect(client.shutdownAcknowledged)
         #expect(client.shutdownTimedOut(nowMilliseconds: 10_000) == false)
     }
+}
+
+private func makeReceivingLoop() -> MoshSSPInMemoryLoop<ByteState, ByteState> {
+    MoshSSPInMemoryLoop(
+        initialSendState: ByteState(),
+        initialReceiveState: ByteState(),
+        chaffSource: .none
+    )
+}
+
+private func singleFragmentPacket(
+    for instruction: MoshTransportInstruction,
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws -> MoshPacketPlaintext {
+    var fragmenter = MoshFragmenter()
+    let fragments = try fragmenter.makeFragments(
+        for: instruction,
+        maximumSerializedFragmentByteCount: 1_280
+    )
+    #expect(fragments.count == 1, "Test instruction must fit a single fragment.", sourceLocation: sourceLocation)
+    let fragment = try #require(fragments.first, sourceLocation: sourceLocation)
+    return MoshPacketPlaintext(
+        timestamp: UInt16.max,
+        timestampReply: UInt16.max,
+        payload: fragment.serializedBytes()
+    )
 }
 
 private func deliver<Packets: Sequence>(

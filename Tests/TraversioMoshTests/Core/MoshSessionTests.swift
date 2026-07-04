@@ -35,7 +35,7 @@ struct MoshSessionTests {
             )
             #expect(
                 diagnosticEvents == [
-                    .started(fixture.endpoint),
+                    .started(host: fixture.endpoint.host, port: fixture.endpoint.port),
                     .datagramsSent(packetCount: 1),
                 ]
             )
@@ -44,6 +44,108 @@ struct MoshSessionTests {
             await fixture.serverRuntime.stop()
         } catch {
             serverInstructionTask.cancel()
+            diagnosticEventTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    // A server-initiated shutdown (the server sends the shutdown-sentinel state
+    // number) must be detected so the session finishes its host/render streams
+    // cleanly and emits a distinguishable `.peerShutdown` event, rather than
+    // hanging `hostOperations` consumers.
+    @Test
+    func serverInitiatedShutdownFinishesStreamsCleanly() async throws {
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24)
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 1_000)
+        let renderOperationTask = collectRenderOperations(from: fixture.session, count: 1_000)
+        let diagnosticEventTask = collectEvents(from: fixture.session, count: 1_000)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            // The server initiates shutdown, sending the shutdown-sentinel state
+            // number (`UInt64.max`) to the client.
+            await fixture.serverRuntime.startShutdown()
+            let shutdownBatch = try #require(try await fixture.serverRuntime.sendDueDatagrams())
+            #expect(shutdownBatch.sspBatch.instruction.newNumber == UInt64.max)
+
+            // Both terminal streams must complete (not hang). withSessionTimeout
+            // turns a hang into a test failure.
+            let hostOperations = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+            _ = try await withSessionTimeout {
+                try await renderOperationTask.value
+            }
+            _ = hostOperations
+
+            let diagnosticEvents = try await withSessionTimeout {
+                await diagnosticEventTask.value
+            }
+            #expect(diagnosticEvents.contains(.peerShutdown))
+            #expect(diagnosticEvents.last == .stopped)
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            hostOperationTask.cancel()
+            renderOperationTask.cancel()
+            diagnosticEventTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    // The session key must never ride the diagnostic event stream, and an endpoint
+    // must redact its key in string/reflected forms.
+    @Test
+    func diagnosticEventsAndEndpointNeverExposeSessionKey() async throws {
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24)
+        let diagnosticEventTask = collectEvents(from: fixture.session, count: 1_000)
+        let encodedKey = fixture.endpoint.sessionKey.encodedRepresentation
+        let rawKeyBytes = fixture.endpoint.sessionKey.rawBytes
+        let rawKeyByteListForms = [
+            rawKeyBytes.map(String.init).joined(separator: ", "),
+            rawKeyBytes.map { String($0, radix: 16) }.joined(),
+        ]
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+
+            let diagnosticEvents = await diagnosticEventTask.value
+            #expect(diagnosticEvents.isEmpty == false)
+
+            for event in diagnosticEvents {
+                for rendered in [String(describing: event), String(reflecting: event)] {
+                    #expect(rendered.contains(encodedKey) == false)
+                    for byteForm in rawKeyByteListForms {
+                        #expect(rendered.contains(byteForm) == false)
+                    }
+                }
+                // Beyond string rendering: the event must not carry a live
+                // MoshSessionKey value at any depth, so a consumer can never hold
+                // (or wipe) key material off the diagnostic stream.
+                #expect(reflectedValueContainsSessionKey(event) == false)
+            }
+
+            // The endpoint itself redacts its key in both string forms.
+            let endpointDescription = String(describing: fixture.endpoint)
+            let endpointDebugDescription = String(reflecting: fixture.endpoint)
+            #expect(endpointDescription.contains("<redacted>"))
+            #expect(endpointDescription.contains(encodedKey) == false)
+            #expect(endpointDebugDescription.contains(encodedKey) == false)
+            for byteForm in rawKeyByteListForms {
+                #expect(endpointDescription.contains(byteForm) == false)
+                #expect(endpointDebugDescription.contains(byteForm) == false)
+            }
+        } catch {
             diagnosticEventTask.cancel()
             await fixture.session.stop()
             await fixture.serverRuntime.stop()
@@ -748,7 +850,7 @@ struct MoshSessionTests {
 
             #expect(
                 diagnosticEvents == [
-                    .started(fixture.endpoint),
+                    .started(host: fixture.endpoint.host, port: fixture.endpoint.port),
                     .datagramsSent(packetCount: 1),
                 ]
             )
@@ -842,7 +944,7 @@ struct MoshSessionTests {
             await renderFailureTask.value
         }
 
-        #expect(diagnosticEvents == [.started(endpoint), .stopped])
+        #expect(diagnosticEvents == [.started(host: endpoint.host, port: endpoint.port), .stopped])
         #expect((hostFailure as? MoshDatagramTransportError) == .notConnected)
         #expect((renderFailure as? MoshDatagramTransportError) == .notConnected)
         #expect(await failingLink.stopCount() == 1)
@@ -888,7 +990,7 @@ struct MoshSessionTests {
             #expect((renderFailure as? MoshDatagramTransportError) == incomingError)
             #expect(
                 diagnosticEvents == [
-                    .started(endpoint),
+                    .started(host: endpoint.host, port: endpoint.port),
                     .stopped,
                 ]
             )
@@ -952,7 +1054,7 @@ struct MoshSessionTests {
                 await renderFailureTask.value
             }
 
-            #expect(diagnosticEvents == [.started(endpoint), .datagramsSent(packetCount: 1), .stopped])
+            #expect(diagnosticEvents == [.started(host: endpoint.host, port: endpoint.port), .datagramsSent(packetCount: 1), .stopped])
             #expect((hostFailure as? MoshDatagramTransportError) == sendError)
             #expect((renderFailure as? MoshDatagramTransportError) == sendError)
             #expect(await link.stopCount() == 1)
@@ -1182,7 +1284,7 @@ struct MoshSessionTests {
                 await diagnosticEventTask.value
             }
 
-            #expect(diagnosticEvents == [.started(fixture.endpoint), .stopped])
+            #expect(diagnosticEvents == [.started(host: fixture.endpoint.host, port: fixture.endpoint.port), .stopped])
             #expect(await fixture.timer.pendingSleepCount() == 0)
 
             await fixture.serverRuntime.stop()
@@ -1355,7 +1457,7 @@ struct MoshSessionTests {
             }
 
             #expect(diagnosticEvents == [
-                .started(fixture.endpoint),
+                .started(host: fixture.endpoint.host, port: fixture.endpoint.port),
                 .datagramsSent(packetCount: 1),
                 .datagramsSent(packetCount: 1),
                 .stopped,
@@ -1902,3 +2004,21 @@ private func expectSessionError(
 }
 
 private let sessionKeyBytes = Array(UInt8(0)..<UInt8(16))
+
+/// Recursively walks a value's reflection to detect whether any child (at any
+/// depth) is a `MoshSessionKey`. Used to prove a diagnostic event does not carry
+/// key material as a live value.
+private func reflectedValueContainsSessionKey(_ value: Any, depth: Int = 0) -> Bool {
+    if value is MoshSessionKey {
+        return true
+    }
+    guard depth < 8 else {
+        return false
+    }
+    for child in Mirror(reflecting: value).children {
+        if reflectedValueContainsSessionKey(child.value, depth: depth + 1) {
+            return true
+        }
+    }
+    return false
+}

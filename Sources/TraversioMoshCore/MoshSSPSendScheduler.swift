@@ -278,11 +278,24 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         }
     }
 
-    public mutating func noteReceivedState(number: UInt64, nowMilliseconds: UInt64) {
+    /// Records that a numbered state was appended at the back of the receiver's
+    /// queue. Always updates the ack number and last-heard time (official Mosh's
+    /// `sender.set_ack_num` + `sender.remote_heard`). The delayed data-acknowledgement
+    /// is armed only when the received instruction carried a non-empty diff,
+    /// mirroring `set_data_ack()` being gated on `!inst.diff().empty()` in
+    /// `network/networktransport-impl.h`. Gating this prevents an endless
+    /// empty-ack ping-pong between two instances.
+    public mutating func noteReceivedState(
+        number: UInt64,
+        hadNonEmptyDiff: Bool = true,
+        nowMilliseconds: UInt64
+    ) {
         self.sender.setAcknowledgementNumber(number)
-        self.pendingDataAcknowledgement = true
         self.lastHeardAtMilliseconds = nowMilliseconds
-        self.scheduleDelayedAcknowledgement(from: nowMilliseconds)
+        if hadNonEmptyDiff {
+            self.pendingDataAcknowledgement = true
+            self.scheduleDelayedAcknowledgement(from: nowMilliseconds)
+        }
     }
 
     public mutating func noteRemoteHeard(nowMilliseconds: UInt64) {
