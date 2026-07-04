@@ -1577,6 +1577,60 @@ struct MoshSessionTests {
         }
     }
 
+    // Defect 2 at the session layer: a momentary backward clock skew across two send
+    // paths must not tear the session down. A user keystroke reads the clock behind an
+    // `await` and feeds it to the SSP loop; if that read momentarily returns a value
+    // below the last-applied send time (actor-reentrancy / clock-read skew), the sender's
+    // clock-moved-backward guard fired on the ungenerationed user-send path and finished
+    // the streams. The runtime now clamps the applied time to be monotonic, so the send
+    // succeeds and the session stays alive and usable. (Pre-fix, the second
+    // `sendKeystrokes` threw `clockMovedBackward` and the session stopped.)
+    @Test
+    func backwardClockSkewOnUserSendKeepsSessionAlive() async throws {
+        let fixture = try await makeSessionFixture(columns: 80, rows: 24)
+        let serverInstructionTask = collectServerInstructions(from: fixture.serverRuntime, count: 3)
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            // First keystroke lands at clock 100, fixing the sender's last-sent time.
+            await fixture.clock.set(toMilliseconds: 100)
+            try await fixture.session.sendKeystrokes([0x61])
+
+            // The clock momentarily steps backward to 99. The user-send path applies it
+            // to the SSP loop; without the monotonic clamp this violated `now >=
+            // lastSentAt(100)` and tore the session down.
+            await fixture.clock.set(toMilliseconds: 99)
+            try await fixture.session.sendKeystrokes([0x62])
+
+            // The session survived and both keystrokes reached the server in order.
+            let serverInstructions = try await withSessionTimeout {
+                try await serverInstructionTask.value
+            }
+            let finalState = try #require(serverInstructions.last).instructionResult.latestState.state
+            #expect(
+                finalState.operations == [
+                    .resize(try MoshTerminalDimensions(columns: 80, rows: 24)),
+                    .keystrokes([0x61]),
+                    .keystrokes([0x62]),
+                ]
+            )
+
+            // Still usable: time recovers and a further keystroke is accepted.
+            await fixture.clock.set(toMilliseconds: 200)
+            try await fixture.session.sendKeystrokes([0x63])
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            serverInstructionTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
     // Defect B at the session layer: an automatic link rebuild after a transport
     // failure resumes the SAME session on a fresh link and surfaces `.reconnected`.
     @Test
@@ -1646,6 +1700,12 @@ private actor ManualMillisecondsClock: MoshMillisecondsClock {
 
     func advance(byMilliseconds milliseconds: UInt64) {
         self.nowMillisecondsStorage += milliseconds
+    }
+
+    /// Sets the clock to an absolute value, which may be LOWER than the current value
+    /// so a test can construct a momentary backward clock skew.
+    func set(toMilliseconds milliseconds: UInt64) {
+        self.nowMillisecondsStorage = milliseconds
     }
 
     func nowMilliseconds() async -> UInt64 {

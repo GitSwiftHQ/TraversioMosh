@@ -175,6 +175,60 @@ struct MoshSSPSendSchedulerTests {
         #expect(try scheduler.tick(nowMilliseconds: 200) == nil)
     }
 
+    // Defect 1 (no-hot-spin proof): the benign timing race in which `waitTime`
+    // reports a send is due (returns 0) but an inbound datagram, processed before the
+    // matching `tick`, erases the due-ness. Here an ACK acknowledges the sole pending
+    // state so the current state becomes the known-acknowledged state; `tick` then has
+    // nothing to send and returns nil — exactly official Mosh's `tick()`, which in this
+    // case only recomputes timers and returns (no error). The maintenance loop MUST
+    // treat this as benign. Critically, this proves it does not busy-spin: the very next
+    // `waitTime` recomputes to a strictly positive wait (the idle acknowledgement
+    // interval), so the loop sleeps rather than tight-looping at 0. A consistent
+    // scheduler state can never report a due send with an empty diff, because
+    // `updateAssumedReceiverState`'s freshness reset makes the retransmit diff
+    // non-empty precisely when the send becomes due.
+    @Test
+    func dueSendErasedByAcknowledgementBecomesBenignNoOpWithoutHotSpin() throws {
+        var scheduler = MoshSSPSendScheduler(
+            initialState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(
+                sendIntervalMilliseconds: 20,
+                acknowledgementIntervalMilliseconds: 10_000,
+                activeRetryTimeoutMilliseconds: 10_000,
+                sendMinimumDelayMilliseconds: 0,
+                timeoutMilliseconds: 50
+            ),
+            chaffSource: .none
+        )
+
+        scheduler.setCurrentState(ByteState([1]), nowMilliseconds: 0)
+        _ = try requireData(try scheduler.tick(nowMilliseconds: 20))
+        scheduler.noteRemoteHeard(nowMilliseconds: 21)
+
+        // The retransmit of the unacknowledged state 1 becomes due at
+        // lastSentAt(20) + timeout(50) + ackDelay(100) = 170, so `waitTime` reports 0.
+        #expect(try scheduler.waitTime(nowMilliseconds: 170) == 0)
+
+        // The race: an ACK for state 1 lands before `tick` runs. The pending state is
+        // now the known-acknowledged state, so there is nothing to retransmit.
+        scheduler.processAcknowledgement(through: 1, nowMilliseconds: 170)
+
+        // Benign: `tick` finds nothing due and returns nil (official `tick()` behavior).
+        // Pre-fix, `MoshSession.runMaintenanceLoop` threw
+        // `timerExpiredWithoutDueDatagram` on exactly this outcome and tore the session
+        // down.
+        #expect(try scheduler.tick(nowMilliseconds: 170) == nil)
+
+        // No hot spin: the recomputed wait is strictly positive, so the loop sleeps.
+        let nextWait = try #require(try scheduler.waitTime(nowMilliseconds: 170))
+        #expect(nextWait > 0)
+
+        // Still usable: a later local change is transmitted when due.
+        scheduler.modifyCurrentState(nowMilliseconds: 170) { $0.bytes.append(2) }
+        let resumed = try requireData(try scheduler.tick(nowMilliseconds: 190))
+        #expect(resumed.diff?.isEmpty == false)
+    }
+
     @Test
     func shutdownSendsMaximumStateNumberAtSendInterval() throws {
         var scheduler = MoshSSPSendScheduler(

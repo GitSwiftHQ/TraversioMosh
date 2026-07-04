@@ -155,7 +155,6 @@ public enum MoshSessionError: Error, Equatable, Sendable {
     case notStarted
     case stopped
     case shutdownTimedOut
-    case timerExpiredWithoutDueDatagram
 }
 
 public enum MoshSessionScreenProjectionFailureReason: Equatable, Sendable {
@@ -949,14 +948,22 @@ public actor MoshSession {
                     return
                 }
 
-                let sentDatagram = try await self.sendDueDatagrams()
+                // A tick that finds nothing due is BENIGN, exactly as official Mosh's
+                // `TransportSender::tick` (`network/transportsender-impl.h` ~138-187):
+                // when no diff/ack needs sending it simply recomputes timers (clearing
+                // `next_send_time`) and returns — there is no error path that ends the
+                // session. `waitTime()` and `sendDueDatagrams()` are separate actor hops
+                // (each awaits the clock), so an in-flight inbound datagram can legitimately
+                // erase the due-ness the scheduler reported at `waitTime()` — e.g. an ACK
+                // makes the current state match the assumed-receiver state (`nextSendAt` →
+                // nil), or a timestamp-reply raises SRTT and pushes `nextSendAt` into the
+                // future. Treating that as fatal tore down healthy sessions nondeterministically.
+                // We do not spin: after such a no-op the scheduler's timer has recomputed to
+                // a positive wait or nil (the assumed-receiver freshness reset guarantees a
+                // consistent state never reports a due send with an empty diff), so the loop
+                // re-evaluates `waitTime()` and then sleeps or exits.
+                _ = try await self.sendDueDatagrams()
                 await self.emitNoContactIfNeeded(runtime: runtime)
-                if sentDatagram == false, waitMilliseconds == 0 {
-                    guard self.shouldContinueMaintenance(generation: generation) else {
-                        return
-                    }
-                    throw MoshSessionError.timerExpiredWithoutDueDatagram
-                }
                 if await runtime.shutdownTimedOut() {
                     throw MoshSessionError.shutdownTimedOut
                 }

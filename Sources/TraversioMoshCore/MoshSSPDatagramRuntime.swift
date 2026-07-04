@@ -114,6 +114,19 @@ public actor MoshSSPDatagramRuntime<
     /// `Connection::send_error` (`network/network.cc` ~378-386): informational, and
     /// cleared once a send succeeds.
     private var recordedSendErrorDescription: String?
+    /// Greatest clock value already applied to the SSP loop. The loop/sender assume
+    /// a monotonic non-decreasing timeline (official Mosh feeds a monotonic
+    /// `timestamp()` derived from `CLOCK_MONOTONIC`; `MoshSSPSender.updateAssumedReceiverState`
+    /// enforces `now >= lastSentAt`). Every loop-advancing entry point reads the clock
+    /// behind an `await` suspension, so actor reentrancy can interleave two such calls
+    /// and apply a later-read value that is momentarily *below* one already fed to the
+    /// loop — even though the underlying clock never runs backward. Clamping the applied
+    /// value to this high-water mark at the runtime boundary restores the monotonic
+    /// timeline the loop is written against, so a benign interleaving skew can no longer
+    /// trip the sender's clock-moved-backward guard and tear the session down. It does
+    /// not weaken that guard: it is a lower-level invariant still exercised directly, and
+    /// the system clock does not produce genuine backward jumps here.
+    private var lastAppliedNowMilliseconds: UInt64 = 0
     private var isStarted = false
     private var isStopped = false
 
@@ -209,12 +222,12 @@ public actor MoshSSPDatagramRuntime<
     }
 
     public func setCurrentState(_ state: SendState) async {
-        let nowMilliseconds = await self.clock.nowMilliseconds()
+        let nowMilliseconds = await self.monotonicNowMilliseconds()
         self.loop.setCurrentState(state, nowMilliseconds: nowMilliseconds)
     }
 
     public func modifyCurrentState(_ body: @Sendable (inout SendState) -> Void) async {
-        let nowMilliseconds = await self.clock.nowMilliseconds()
+        let nowMilliseconds = await self.monotonicNowMilliseconds()
         self.loop.modifyCurrentState(nowMilliseconds: nowMilliseconds, body)
     }
 
@@ -223,24 +236,24 @@ public actor MoshSSPDatagramRuntime<
     }
 
     public func startShutdown() async {
-        let nowMilliseconds = await self.clock.nowMilliseconds()
+        let nowMilliseconds = await self.monotonicNowMilliseconds()
         self.loop.startShutdown(nowMilliseconds: nowMilliseconds)
     }
 
     public func shutdownTimedOut() async -> Bool {
-        let nowMilliseconds = await self.clock.nowMilliseconds()
+        let nowMilliseconds = await self.monotonicNowMilliseconds()
         return self.loop.shutdownTimedOut(nowMilliseconds: nowMilliseconds)
     }
 
     public func waitTime() async throws -> UInt64? {
         try self.requireStarted()
-        let nowMilliseconds = await self.clock.nowMilliseconds()
+        let nowMilliseconds = await self.monotonicNowMilliseconds()
         return try self.loop.waitTime(nowMilliseconds: nowMilliseconds)
     }
 
     public func sendDueDatagrams() async throws -> MoshSSPDatagramOutgoingBatch? {
         try self.requireStarted()
-        let nowMilliseconds = await self.clock.nowMilliseconds()
+        let nowMilliseconds = await self.monotonicNowMilliseconds()
         guard let batch = try self.loop.tick(nowMilliseconds: nowMilliseconds) else {
             return nil
         }
@@ -308,7 +321,7 @@ public actor MoshSSPDatagramRuntime<
         let packet = try MoshPacketPlaintext(
             serializedBytes: receivedDatagram.openedDatagram.plaintext
         )
-        let nowMilliseconds = await self.clock.nowMilliseconds()
+        let nowMilliseconds = await self.monotonicNowMilliseconds()
         let packetResult = try self.loop.receive(
             packet,
             nowMilliseconds: nowMilliseconds,
@@ -380,6 +393,18 @@ public actor MoshSSPDatagramRuntime<
     /// or `nil` if the last send succeeded. Mirrors official `Connection::send_error`.
     public func recordedSendError() -> String? {
         self.recordedSendErrorDescription
+    }
+
+    /// Reads the clock and returns a value clamped to be monotonic non-decreasing
+    /// with respect to what has already been applied to the SSP loop. Because the read
+    /// and the subsequent loop call run without an intervening suspension, the applied
+    /// timeline the loop sees is guaranteed monotonic even under actor reentrancy at the
+    /// clock read. See `lastAppliedNowMilliseconds`.
+    private func monotonicNowMilliseconds() async -> UInt64 {
+        let reading = await self.clock.nowMilliseconds()
+        let monotonic = max(reading, self.lastAppliedNowMilliseconds)
+        self.lastAppliedNowMilliseconds = monotonic
+        return monotonic
     }
 
     private func requireStarted() throws {

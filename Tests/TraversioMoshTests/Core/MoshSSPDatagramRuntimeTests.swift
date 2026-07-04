@@ -463,6 +463,166 @@ struct MoshSSPDatagramRuntimeTests {
         }
     }
 
+    // Defect 1: the maintenance loop's `waitTime()` reports a send is due (returns 0),
+    // but before the paired `sendDueDatagrams()` runs, an inbound ACK acknowledges the
+    // sole unacknowledged state. `sendDueDatagrams()` then correctly produces nothing.
+    // Pre-fix, `MoshSession.runMaintenanceLoop` treated this exact outcome
+    // (`waitTime()==0` yet nothing sent) as fatal and threw
+    // `timerExpiredWithoutDueDatagram`, tearing a healthy session down. Official Mosh's
+    // `tick()` never errors here — it just recomputes timers. This drives the runtime
+    // through that precise interleaving with the manual clock and asserts the runtime
+    // survives, does not busy-spin, and stays usable.
+    @Test
+    func dueSendErasedByInboundAckIsBenignAndDoesNotSpin() async throws {
+        let pair = await MoshInMemoryDatagramLink.connectedPair()
+        let clock = ManualMillisecondsClock()
+        let timing = MoshSSPSendTimingConfiguration(
+            sendIntervalMilliseconds: 20,
+            acknowledgementIntervalMilliseconds: 10_000,
+            activeRetryTimeoutMilliseconds: 10_000,
+            sendMinimumDelayMilliseconds: 0,
+            timeoutMilliseconds: 50
+        )
+        let client = try makeRuntime(
+            link: pair.client,
+            clock: clock,
+            sendDirection: .toServer,
+            receiveDirection: .toClient,
+            timing: timing
+        )
+        // Seals datagrams as the server would (client receives on `.toClient`).
+        var serverSequencer = try MoshDatagramSequencer(
+            rawKey: runtimeKey,
+            sendDirection: .toClient,
+            receiveDirection: .toServer
+        )
+
+        do {
+            try await pair.server.start()
+            try await client.start()
+
+            await clock.set(0)
+            await client.setCurrentState(ByteState([1]))
+            await clock.set(20)
+            _ = try #require(try await client.sendDueDatagrams())
+
+            // The client hears the server (heartbeat, empty diff so no delayed-ack is
+            // armed), enabling the active-retry retransmit branch.
+            await clock.set(21)
+            let heartbeat = try sealedServerDatagram(
+                instruction: MoshTransportInstruction(
+                    protocolVersion: 2,
+                    oldNumber: 0,
+                    newNumber: 0,
+                    acknowledgementNumber: 0,
+                    throwawayNumber: 0,
+                    diff: [],
+                    chaff: []
+                ),
+                timestamp: 21,
+                timestampReply: UInt16.max,
+                sequencer: &serverSequencer
+            )
+            _ = try await client.receiveDatagram(heartbeat)
+
+            // The retransmit of the unacknowledged state 1 is due at
+            // lastSentAt(20) + timeout(50) + ackDelay(100) = 170: `waitTime` reports 0.
+            await clock.set(170)
+            #expect(try await client.waitTime() == 0)
+
+            // The race: an ACK for state 1 lands before the tick. Now the current state
+            // is the known-acknowledged state, so there is nothing to retransmit.
+            let ack = try sealedServerDatagram(
+                instruction: MoshTransportInstruction(
+                    protocolVersion: 2,
+                    oldNumber: 0,
+                    newNumber: 1,
+                    acknowledgementNumber: 1,
+                    throwawayNumber: 0,
+                    diff: [],
+                    chaff: []
+                ),
+                timestamp: 170,
+                timestampReply: UInt16.max,
+                sequencer: &serverSequencer
+            )
+            _ = try await client.receiveDatagram(ack)
+
+            // Benign: nothing is due, so no batch is produced — and this must NOT be
+            // fatal. (Pre-fix, the session threw here.)
+            #expect(try await client.sendDueDatagrams() == nil)
+
+            // No hot spin: the recomputed wait is nil or strictly positive.
+            let nextWait = try await client.waitTime()
+            #expect((nextWait ?? 1) > 0)
+
+            // Still usable and alive: a subsequent change is transmitted.
+            await clock.set(200)
+            await client.setCurrentState(ByteState([1, 2, 3]))
+            await clock.set(220)
+            #expect(try await client.sendDueDatagrams() != nil)
+
+            await client.stop()
+            await pair.server.stop()
+        } catch {
+            await client.stop()
+            await pair.server.stop()
+            throw error
+        }
+    }
+
+    // Defect 2: two loop-advancing entry points (a maintenance tick and a user
+    // keystroke) each read the clock behind an `await` suspension. Actor reentrancy can
+    // interleave them so a later-read clock value is applied to the loop *below* one
+    // already applied, even though the underlying clock is monotonic. The runtime
+    // boundary must clamp the applied time to be monotonic non-decreasing so the sender's
+    // clock-moved-backward guard cannot fire on this benign skew and tear the runtime
+    // down. Here a send at now=100 is followed by another send whose clock read returns
+    // 99; pre-fix this threw `MoshSSPError.clockMovedBackward` out of `sendDueDatagrams`.
+    @Test
+    func backwardClockSkewBetweenSendsIsClampedAndNotFatal() async throws {
+        let pair = await MoshInMemoryDatagramLink.connectedPair()
+        let clock = ManualMillisecondsClock()
+        let client = try makeRuntime(
+            link: pair.client,
+            clock: clock,
+            sendDirection: .toServer,
+            receiveDirection: .toClient
+        )
+
+        do {
+            try await pair.server.start()
+            try await client.start()
+
+            await clock.set(0)
+            await client.setCurrentState(ByteState([1]))
+            await clock.set(100)
+            _ = try #require(try await client.sendDueDatagrams())
+
+            // A momentary backward skew: the next loop-advancing reads return 99, below
+            // the 100 already applied to the sender's last-sent timestamp. Every
+            // `waitTime`/`tick` runs `updateAssumedReceiverState`, which pre-fix threw
+            // `MoshSSPError.clockMovedBackward` for `now(99) < lastSentAt(100)`. Post-fix
+            // the applied time is clamped to 100, so neither of these throws.
+            await clock.set(99)
+            await client.setCurrentState(ByteState([1, 2]))
+            _ = try await client.waitTime()
+            _ = try await client.sendDueDatagrams()
+
+            // The runtime is alive and monotonic going forward: a later change is sent.
+            await clock.set(200)
+            await client.setCurrentState(ByteState([1, 2, 3]))
+            #expect(try await client.sendDueDatagrams() != nil)
+
+            await client.stop()
+            await pair.server.stop()
+        } catch {
+            await client.stop()
+            await pair.server.stop()
+            throw error
+        }
+    }
+
     // Defect C: a runtime abandoned WITHOUT an explicit `stop()` must still tear
     // down its datagram link, so the underlying socket cannot leak. The runtime's
     // `deinit` drives the link's `stop()`.
@@ -530,6 +690,28 @@ private func makeRuntime(
         link: link,
         clock: clock
     )
+}
+
+private func sealedServerDatagram(
+    instruction: MoshTransportInstruction,
+    timestamp: UInt16,
+    timestampReply: UInt16,
+    sequencer: inout MoshDatagramSequencer
+) throws -> [UInt8] {
+    var fragmenter = MoshFragmenter()
+    let fragments = try fragmenter.makeFragments(
+        for: instruction,
+        maximumSerializedFragmentByteCount: MoshSSPDatagramBudget.defaultMaximumSerializedFragmentByteCount
+    )
+    guard let fragment = fragments.first, fragments.count == 1 else {
+        throw RuntimeTestFailure()
+    }
+    let plaintext = MoshPacketPlaintext(
+        timestamp: timestamp,
+        timestampReply: timestampReply,
+        payload: fragment.serializedBytes()
+    )
+    return try sequencer.seal(plaintext: plaintext.serializedBytes())
 }
 
 private func nextDatagram(from link: MoshInMemoryDatagramLink) async throws -> [UInt8]? {
