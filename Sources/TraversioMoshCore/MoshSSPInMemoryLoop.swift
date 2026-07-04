@@ -5,6 +5,36 @@
 
 import TraversioMoshWire
 
+public enum MoshSSPDatagramBudget {
+    /// Default maximum serialized outgoing *fragment* size, in bytes.
+    ///
+    /// This is the value passed to the fragmenter (official Mosh passes
+    /// `connection->get_MTU() - Network::Connection::ADDED_BYTES -
+    /// Crypto::Session::ADDED_BYTES` to `Fragmenter::make_fragments`,
+    /// `network/transportsender-impl.h` ~322-323). It bounds the whole serialized
+    /// fragment (header + content), and every byte of overhead is added *outside*
+    /// it to form the UDP datagram:
+    ///
+    ///   datagram = nonce(8) + [ timestamp(2) + timestampReply(2) + fragment ] + OCB tag(16)
+    ///           = fragment + 28
+    ///
+    /// Official caps the *datagram* at `DEFAULT_SEND_MTU = 500` on the send path
+    /// as its conservative "of last resort" budget (`network/network.h` ~124), the
+    /// figure it also falls back to on `EMSGSIZE`. It is deliberately below the
+    /// guaranteed IPv6 minimum MTU (1280) so a datagram never fragments on any
+    /// path. This package performs no PMTU discovery, no per-family `set_MTU`, and
+    /// no `EMSGSIZE` recovery, so the conservative 500-byte datagram ceiling is the
+    /// correct default rather than the 1280 *receive* figure.
+    ///
+    /// Accounting the 28 bytes of nonce/timestamp/tag overhead against that
+    /// 500-byte datagram ceiling (`500 - 28`) yields:
+    ///
+    ///   maximumSerializedFragmentByteCount = 472  ->  datagram = 472 + 28 = 500
+    ///
+    /// Kept configurable via `MoshSessionConfiguration.maximumSerializedFragmentByteCount`.
+    public static let defaultMaximumSerializedFragmentByteCount = 472
+}
+
 public struct MoshSSPOutgoingPacket: Equatable, Sendable {
     public let plaintext: MoshPacketPlaintext
     public let fragment: MoshFragment
@@ -80,7 +110,7 @@ public struct MoshSSPInMemoryLoop<
         initialReceiveState: ReceiveState,
         initialNowMilliseconds: UInt64 = 0,
         timing: MoshSSPSendTimingConfiguration = MoshSSPSendTimingConfiguration(),
-        maximumSerializedFragmentByteCount: Int = 1_280,
+        maximumSerializedFragmentByteCount: Int = MoshSSPDatagramBudget.defaultMaximumSerializedFragmentByteCount,
         chaffSource: MoshSSPChaffSource = .random
     ) {
         self.scheduler = MoshSSPSendScheduler(
@@ -114,6 +144,22 @@ public struct MoshSSPInMemoryLoop<
 
     public var sendIntervalMilliseconds: UInt64 {
         self.scheduler.sendIntervalMilliseconds
+    }
+
+    /// Clock time (ms) of the most recent in-sequence datagram/acknowledgement, or
+    /// `nil` before first contact. Informational liveness signal only.
+    public var lastHeardAtMilliseconds: UInt64? {
+        self.scheduler.lastHeardAtMilliseconds
+    }
+
+    /// Smoothed round-trip time estimate (ms), Jacobson/Karels SRTT.
+    public var smoothedRoundTripMilliseconds: Double {
+        self.scheduler.smoothedRoundTripMilliseconds
+    }
+
+    /// Round-trip time variation estimate (ms).
+    public var roundTripVariationMilliseconds: Double {
+        self.scheduler.roundTripVariationMilliseconds
     }
 
     public var shutdownAcknowledged: Bool {

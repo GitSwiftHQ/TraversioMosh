@@ -170,7 +170,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     private var nextAcknowledgementAtMilliseconds: UInt64
     private var nextSendAtMilliseconds: UInt64?
     private var firstPendingChangeAtMilliseconds: UInt64?
-    private var lastHeardAtMilliseconds: UInt64?
+    private var lastHeardAtMillisecondsStorage: UInt64?
     private var pendingDataAcknowledgement: Bool
     private var shutdownStartedAtMilliseconds: UInt64?
     private var shutdownAttemptCountStorage: Int
@@ -194,7 +194,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         )
         self.nextSendAtMilliseconds = nil
         self.firstPendingChangeAtMilliseconds = nil
-        self.lastHeardAtMilliseconds = nil
+        self.lastHeardAtMillisecondsStorage = nil
         self.pendingDataAcknowledgement = false
         self.shutdownStartedAtMilliseconds = nil
         self.shutdownAttemptCountStorage = 0
@@ -210,6 +210,16 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
 
     public var shutdownAttemptCount: Int {
         self.shutdownAttemptCountStorage
+    }
+
+    /// Clock time (ms) at which the peer was last heard from: the timestamp of the
+    /// most recent in-sequence datagram or acknowledgement. `nil` until first
+    /// contact. Mirrors official Mosh `Connection::last_heard`
+    /// (`network/network.cc`), surfaced for host-visible liveness rendering
+    /// ("last contact Ns ago", `frontend/terminaloverlay.cc` ~205-217). Purely
+    /// informational: it never drives teardown.
+    public var lastHeardAtMilliseconds: UInt64? {
+        self.lastHeardAtMillisecondsStorage
     }
 
     public var sendIntervalMilliseconds: UInt64 {
@@ -291,7 +301,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         nowMilliseconds: UInt64
     ) {
         self.sender.setAcknowledgementNumber(number)
-        self.lastHeardAtMilliseconds = nowMilliseconds
+        self.lastHeardAtMillisecondsStorage = nowMilliseconds
         if hadNonEmptyDiff {
             self.pendingDataAcknowledgement = true
             self.scheduleDelayedAcknowledgement(from: nowMilliseconds)
@@ -299,7 +309,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     }
 
     public mutating func noteRemoteHeard(nowMilliseconds: UInt64) {
-        self.lastHeardAtMilliseconds = nowMilliseconds
+        self.lastHeardAtMillisecondsStorage = nowMilliseconds
     }
 
     public mutating func processPacketTimestampReply(_ timestampReply: UInt16, nowMilliseconds: UInt64) {
@@ -311,7 +321,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
 
     public mutating func processAcknowledgement(through acknowledgementNumber: UInt64, nowMilliseconds: UInt64) {
         self.sender.processAcknowledgement(through: acknowledgementNumber)
-        self.lastHeardAtMilliseconds = nowMilliseconds
+        self.lastHeardAtMillisecondsStorage = nowMilliseconds
     }
 
     public mutating func waitTime(nowMilliseconds: UInt64) throws -> UInt64? {
@@ -459,7 +469,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     }
 
     private func hasHeardRemoteRecently(_ nowMilliseconds: UInt64) -> Bool {
-        guard let lastHeardAtMilliseconds else {
+        guard let lastHeardAtMilliseconds = self.lastHeardAtMillisecondsStorage else {
             return false
         }
         return Self.saturatingAdd(

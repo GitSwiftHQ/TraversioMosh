@@ -133,6 +133,34 @@ struct MoshDatagramLinkTests {
         await nwLink.stop()
     }
 
+    // Defect C: a started `MoshNWDatagramLink` abandoned WITHOUT `stop()` must still
+    // deallocate — proving the `NWConnection`↔link retain cycle is broken (its
+    // handlers capture `self` weakly) so the bound UDP socket cannot leak. `deinit`
+    // cancels the connection on deallocation.
+    @Test
+    func nwLinkDeallocatesAfterAbandonmentWithoutStop() async throws {
+        weak var weakLink: MoshNWDatagramLink?
+
+        do {
+            let link = MoshNWDatagramLink(
+                endpoint: .hostPort(host: "127.0.0.1", port: 9)
+            )
+            weakLink = link
+            try await link.start()
+            // Deliberately do NOT call stop(); drop the strong reference below.
+        }
+
+        var deallocated = false
+        for _ in 0..<200 where deallocated == false {
+            if weakLink == nil {
+                deallocated = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(deallocated)
+    }
+
     @Test
     func nwLinkRoundTripsDatagramOverLoopback() async throws {
         let server = try LoopbackUDPEchoServer()

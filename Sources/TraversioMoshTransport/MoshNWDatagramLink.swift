@@ -38,6 +38,21 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         self.queue = queue
     }
 
+    /// Break the `NWConnection` ↔ link retain cycle on abandonment.
+    ///
+    /// `NWConnection` strongly retains its `stateUpdateHandler`/`receiveMessage`
+    /// completion closures, and this link strongly retains the connection. If those
+    /// closures captured `self` strongly, an abandoned link (one dropped without an
+    /// explicit `stop()`) could never deallocate, permanently leaking the bound UDP
+    /// socket. All connection closures therefore capture `self` weakly (see
+    /// `start()`/`scheduleReceive()`/`send`), so the only strong edge is
+    /// link → connection; when the last external reference drops, this `deinit`
+    /// runs and cancels the connection, releasing the socket even though `stop()`
+    /// was never called.
+    deinit {
+        self.connection.cancel()
+    }
+
     public func start() async throws {
         guard self.isStopped == false else {
             throw MoshDatagramTransportError.stopped
@@ -47,24 +62,24 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         }
 
         self.isStarted = true
-        self.connection.stateUpdateHandler = { state in
+        self.connection.stateUpdateHandler = { [weak self] state in
             Task {
-                await self.handleState(state)
+                await self?.handleState(state)
             }
         }
-        self.connection.pathUpdateHandler = { path in
+        self.connection.pathUpdateHandler = { [weak self] path in
             Task {
-                await self.handlePath(path)
+                await self?.handlePath(path)
             }
         }
-        self.connection.viabilityUpdateHandler = { isViable in
+        self.connection.viabilityUpdateHandler = { [weak self] isViable in
             Task {
-                await self.handleViability(isViable)
+                await self?.handleViability(isViable)
             }
         }
-        self.connection.betterPathUpdateHandler = { hasBetterPath in
+        self.connection.betterPathUpdateHandler = { [weak self] hasBetterPath in
             Task {
-                await self.handleBetterPath(hasBetterPath)
+                await self?.handleBetterPath(hasBetterPath)
             }
         }
         self.connection.start(queue: self.queue)
@@ -96,9 +111,9 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
                         content: payload,
                         contentContext: .defaultMessage,
                         isComplete: true,
-                        completion: .contentProcessed { error in
+                        completion: .contentProcessed { [weak self] error in
                             Task {
-                                await self.completeSend(sendID, error: error)
+                                await self?.completeSend(sendID, error: error)
                             }
                         }
                     )
@@ -194,9 +209,9 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         }
 
         self.isReceiving = true
-        self.connection.receiveMessage { data, _, _, error in
+        self.connection.receiveMessage { [weak self] data, _, _, error in
             Task {
-                await self.handleReceive(data: data, error: error)
+                await self?.handleReceive(data: data, error: error)
             }
         }
     }

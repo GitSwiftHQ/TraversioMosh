@@ -293,6 +293,205 @@ struct MoshSSPDatagramRuntimeTests {
             throw error
         }
     }
+
+    // Defect B (the crux): swapping the datagram link must preserve the crypto
+    // session's monotonic send sequence. The first datagram sealed on the NEW link
+    // must carry the NEXT sequence number, never 0 — otherwise the OCB nonce would
+    // repeat under the same key and destroy confidentiality and authenticity. This
+    // asserts continuity directly on the wire (decoding each datagram's nonce) AND
+    // via the runtime's borrowed accessor.
+    @Test
+    func replaceLinkPreservesSendSequenceWithoutNonceReset() async throws {
+        let pairA = await MoshInMemoryDatagramLink.connectedPair()
+        let clock = ManualMillisecondsClock()
+        let runtime = try makeRuntime(
+            link: pairA.client,
+            clock: clock,
+            sendDirection: .toServer,
+            receiveDirection: .toClient
+        )
+        // A bare cipher decodes the nonce off the wire without any replay/sequence
+        // bookkeeping, so it reads exactly what the runtime sealed.
+        let cipher = try MoshDatagramCipher(rawKey: runtimeKey)
+
+        do {
+            try await pairA.server.start()
+            try await runtime.start()
+
+            #expect(await runtime.nextSequenceToSend() == 0)
+
+            await clock.set(0)
+            await runtime.setCurrentState(ByteState([0x01]))
+            await clock.set(20)
+            _ = try #require(try await runtime.sendDueDatagrams())
+
+            let firstDatagram = try #require(try await withRuntimeTimeout {
+                try await nextDatagram(from: pairA.server)
+            })
+            let firstNonce = try cipher.open(datagram: firstDatagram).nonce
+            #expect(firstNonce.sequence == 0)
+            #expect(firstNonce.direction == .toServer)
+            #expect(await runtime.nextSequenceToSend() == 1)
+
+            // Swap in a fresh link to the same endpoint (a client port hop). The
+            // sequencer and SSP loop are never read out, copied, or reset.
+            let pairB = await MoshInMemoryDatagramLink.connectedPair()
+            try await pairB.server.start()
+            try await runtime.replaceLink(pairB.client)
+
+            // Continuity holds across the swap: sealing did not reset.
+            #expect(await runtime.nextSequenceToSend() == 1)
+
+            await clock.set(100)
+            await runtime.setCurrentState(ByteState([0x01, 0x02]))
+            await clock.set(200)
+            _ = try #require(try await runtime.sendDueDatagrams())
+
+            let secondDatagram = try #require(try await withRuntimeTimeout {
+                try await nextDatagram(from: pairB.server)
+            })
+            let secondNonce = try cipher.open(datagram: secondDatagram).nonce
+            // THE assertion: the first datagram on the NEW link carries sequence 1,
+            // the next sequence after the swap — not a reset to 0.
+            #expect(secondNonce.sequence == 1)
+            #expect(secondNonce.sequence != 0)
+            #expect(secondNonce.direction == .toServer)
+            #expect(await runtime.nextSequenceToSend() == 2)
+
+            await runtime.stop()
+            await pairA.server.stop()
+            await pairB.server.stop()
+        } catch {
+            await runtime.stop()
+            await pairA.server.stop()
+            throw error
+        }
+    }
+
+    // Defect A: a transient `link.send` failure must be recorded (not thrown) and
+    // must not tear the runtime down; the SSP retransmit timer then re-delivers the
+    // still-unacknowledged state once the link recovers.
+    @Test
+    func transientSendFailureIsRecordedThenUnackedStateRetransmits() async throws {
+        let pair = await MoshInMemoryDatagramLink.connectedPair()
+        let clock = ManualMillisecondsClock()
+        let timing = MoshSSPSendTimingConfiguration(
+            sendIntervalMilliseconds: 20,
+            acknowledgementIntervalMilliseconds: 1_000,
+            activeRetryTimeoutMilliseconds: 10_000,
+            sendMinimumDelayMilliseconds: 0,
+            timeoutMilliseconds: 50
+        )
+        // The client's first outgoing send fails transiently; afterwards the link
+        // forwards to the real in-memory peer (recovery).
+        let clientLink = IntermittentForwardingLink(inner: pair.client, initialFailures: 1)
+        let client = try makeRuntime(
+            link: clientLink,
+            clock: clock,
+            sendDirection: .toServer,
+            receiveDirection: .toClient,
+            timing: timing
+        )
+        let server = try makeRuntime(
+            link: pair.server,
+            clock: clock,
+            sendDirection: .toClient,
+            receiveDirection: .toServer,
+            timing: timing
+        )
+        let serverInstructionTask = Task<MoshSSPDatagramIncomingInstruction<ByteState>?, Error> {
+            var iterator = server.incomingInstructions.makeAsyncIterator()
+            return try await iterator.next()
+        }
+
+        do {
+            try await client.start()
+            try await server.start()
+
+            await clock.set(0)
+            await client.setCurrentState(ByteState([0x41]))
+
+            // First send: the link rejects it. sendDueDatagrams must still return a
+            // batch (the state is accounted for retransmit) and must NOT throw.
+            await clock.set(20)
+            let firstBatch = try await client.sendDueDatagrams()
+            #expect(firstBatch != nil)
+            #expect(await client.recordedSendError() != nil)
+
+            // The runtime is alive: make the client hear from the server (so the
+            // SSP retransmit branch, which requires recent contact, becomes active)
+            // without acknowledging client state 1.
+            await clock.set(40)
+            await server.setCurrentState(ByteState([0x99]))
+            _ = try await server.sendDueDatagrams()
+            _ = try await withRuntimeTimeout {
+                // Give the client's receive loop time to process the server datagram
+                // (updates last-heard). Poll until contact is registered.
+                while await client.lastHeardAtMilliseconds() == nil {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+                return true
+            }
+
+            // Advance and retransmit until the recovered link delivers the unacked
+            // state. The second (recovered) send succeeds and clears the error.
+            var retransmitted = false
+            for step in 1...50 where retransmitted == false {
+                await clock.set(40 + UInt64(step) * 20)
+                if try await client.sendDueDatagrams() != nil {
+                    retransmitted = true
+                }
+            }
+            #expect(retransmitted)
+            #expect(await client.recordedSendError() == nil)
+
+            let serverInstruction = try #require(try await withRuntimeTimeout {
+                try await serverInstructionTask.value
+            })
+            // The server received the state that had failed to send initially,
+            // proving automatic recovery after the transient failure.
+            #expect(serverInstruction.instructionResult.latestState.state.bytes == [0x41])
+
+            serverInstructionTask.cancel()
+            await client.stop()
+            await server.stop()
+        } catch {
+            serverInstructionTask.cancel()
+            await client.stop()
+            await server.stop()
+            throw error
+        }
+    }
+
+    // Defect C: a runtime abandoned WITHOUT an explicit `stop()` must still tear
+    // down its datagram link, so the underlying socket cannot leak. The runtime's
+    // `deinit` drives the link's `stop()`.
+    @Test
+    func abandonedRuntimeStopsLinkToPreventSocketLeak() async throws {
+        let link = StopSpyDatagramLink()
+
+        do {
+            var runtime: MoshSSPDatagramRuntime<ByteState, ByteState>? = try makeRuntime(
+                link: link,
+                clock: ManualMillisecondsClock(),
+                sendDirection: .toServer,
+                receiveDirection: .toClient
+            )
+            try await runtime?.start()
+            // Drop the only strong reference without calling stop().
+            runtime = nil
+        }
+
+        // The deinit-driven stop runs on a detached task; poll briefly for it.
+        let stopped = try await withRuntimeTimeout {
+            while await link.stopCount() == 0 {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            return true
+        }
+        #expect(stopped)
+        #expect(await link.stopCount() >= 1)
+    }
 }
 
 private actor ManualMillisecondsClock: MoshMillisecondsClock {
@@ -308,15 +507,16 @@ private actor ManualMillisecondsClock: MoshMillisecondsClock {
 }
 
 private func makeRuntime(
-    link: MoshInMemoryDatagramLink,
+    link: any MoshDatagramLink,
     clock: ManualMillisecondsClock,
     sendDirection: MoshPacketDirection,
-    receiveDirection: MoshPacketDirection
+    receiveDirection: MoshPacketDirection,
+    timing: MoshSSPSendTimingConfiguration = MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20)
 ) throws -> MoshSSPDatagramRuntime<ByteState, ByteState> {
     let loop = MoshSSPInMemoryLoop(
         initialSendState: ByteState(),
         initialReceiveState: ByteState(),
-        timing: MoshSSPSendTimingConfiguration(sendIntervalMilliseconds: 20),
+        timing: timing,
         chaffSource: .none
     )
     let sequencer = try MoshDatagramSequencer(
@@ -330,6 +530,11 @@ private func makeRuntime(
         link: link,
         clock: clock
     )
+}
+
+private func nextDatagram(from link: MoshInMemoryDatagramLink) async throws -> [UInt8]? {
+    var iterator = link.incomingDatagrams.makeAsyncIterator()
+    return try await iterator.next()
 }
 
 private func requireRuntimeInstruction(
@@ -382,6 +587,82 @@ private func withRuntimeTimeout<T: Sendable>(
         }
         group.cancelAll()
         return result
+    }
+}
+
+/// Wraps a real in-memory link but rejects the first `initialFailures` sends with
+/// a transient error before forwarding subsequent datagrams to the peer. Incoming
+/// datagrams pass straight through from the inner link.
+private actor IntermittentForwardingLink: MoshDatagramLink {
+    nonisolated let incomingDatagrams: MoshDatagramStream
+
+    private let inner: MoshInMemoryDatagramLink
+    private let sendError: MoshDatagramTransportError
+    private var failuresRemaining: Int
+
+    init(
+        inner: MoshInMemoryDatagramLink,
+        initialFailures: Int,
+        sendError: MoshDatagramTransportError = .notConnected
+    ) {
+        self.inner = inner
+        self.incomingDatagrams = inner.incomingDatagrams
+        self.failuresRemaining = initialFailures
+        self.sendError = sendError
+    }
+
+    func start() async throws {
+        try await self.inner.start()
+    }
+
+    func send(_ datagram: [UInt8]) async throws {
+        if self.failuresRemaining > 0 {
+            self.failuresRemaining -= 1
+            throw self.sendError
+        }
+        try await self.inner.send(datagram)
+    }
+
+    func stop() async {
+        await self.inner.stop()
+    }
+}
+
+/// Records how many times `stop()` was invoked, so a leak/teardown test can prove
+/// an abandoned runtime still stopped its link.
+private actor StopSpyDatagramLink: MoshDatagramLink {
+    nonisolated let incomingDatagrams: MoshDatagramStream
+
+    private let continuation: MoshDatagramStream.Continuation
+    private var stopCountStorage = 0
+
+    init() {
+        var capturedContinuation: MoshDatagramStream.Continuation?
+        self.incomingDatagrams = MoshDatagramStream(
+            bufferingPolicy: .bufferingNewest(1)
+        ) { continuation in
+            capturedContinuation = continuation
+        }
+
+        guard let capturedContinuation else {
+            preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+        self.continuation = capturedContinuation
+    }
+
+    func start() async throws {}
+
+    func send(_ datagram: [UInt8]) async throws {
+        _ = datagram
+    }
+
+    func stop() async {
+        self.stopCountStorage += 1
+        self.continuation.finish()
+    }
+
+    func stopCount() -> Int {
+        self.stopCountStorage
     }
 }
 

@@ -40,6 +40,70 @@ public protocol MoshSessionTimer: Sendable {
     func sleep(forMilliseconds milliseconds: UInt64) async throws
 }
 
+/// Policy governing automatic link rebuild (transport-death resilience) and the
+/// informational no-contact liveness signal.
+public struct MoshSessionResilienceConfiguration: Sendable {
+    /// Maximum number of consecutive link-rebuild attempts after a transport
+    /// failure before the session gives up and tears down with the last error.
+    /// `nil` retries indefinitely (bounded only by backoff), matching Mosh's
+    /// promise that a session survives arbitrarily long outages. A genuinely-down
+    /// network never tight-loops because each attempt is separated by backoff.
+    public var maximumLinkRebuildAttempts: Int?
+    /// Backoff before the first rebuild attempt (ms). Doubles each attempt.
+    public var initialRebuildBackoffMilliseconds: UInt64
+    /// Upper bound on the exponential backoff interval (ms).
+    public var maximumRebuildBackoffMilliseconds: UInt64
+    /// When the time since the server was last heard from crosses this threshold,
+    /// the session emits a single informational `.noContact` diagnostic (reset once
+    /// contact resumes). Purely informational — it NEVER tears the session down;
+    /// recovery is via link rebuild. Defaults to 60s, matching official Mosh's
+    /// overlay message threshold (`frontend/terminaloverlay.cc` ~318).
+    public var noContactThresholdMilliseconds: UInt64
+
+    public init(
+        maximumLinkRebuildAttempts: Int? = nil,
+        initialRebuildBackoffMilliseconds: UInt64 = 200,
+        maximumRebuildBackoffMilliseconds: UInt64 = 10_000,
+        noContactThresholdMilliseconds: UInt64 = 60_000
+    ) {
+        self.maximumLinkRebuildAttempts = maximumLinkRebuildAttempts
+        self.initialRebuildBackoffMilliseconds = initialRebuildBackoffMilliseconds
+        self.maximumRebuildBackoffMilliseconds = max(
+            initialRebuildBackoffMilliseconds,
+            maximumRebuildBackoffMilliseconds
+        )
+        self.noContactThresholdMilliseconds = noContactThresholdMilliseconds
+    }
+}
+
+/// Host-visible liveness snapshot. Lets a host app render "last contact Ns ago"
+/// and surface latency, mirroring official Mosh's `last_word_from_server` /
+/// `SRTT` reporting (`frontend/terminaloverlay.cc`). Informational only.
+public struct MoshSessionLiveness: Equatable, Sendable {
+    /// Clock time (ms) the server was last heard from, or `nil` before first
+    /// contact.
+    public let lastHeardFromServerMilliseconds: UInt64?
+    /// Elapsed time (ms) since the server was last heard from (or since session
+    /// start if never heard), for direct "last contact Ns ago" rendering.
+    public let millisecondsSinceLastHeard: UInt64
+    /// Smoothed round-trip time estimate (ms).
+    public let smoothedRoundTripMilliseconds: Double
+    /// Round-trip time variation estimate (ms).
+    public let roundTripVariationMilliseconds: Double
+
+    public init(
+        lastHeardFromServerMilliseconds: UInt64?,
+        millisecondsSinceLastHeard: UInt64,
+        smoothedRoundTripMilliseconds: Double,
+        roundTripVariationMilliseconds: Double
+    ) {
+        self.lastHeardFromServerMilliseconds = lastHeardFromServerMilliseconds
+        self.millisecondsSinceLastHeard = millisecondsSinceLastHeard
+        self.smoothedRoundTripMilliseconds = smoothedRoundTripMilliseconds
+        self.roundTripVariationMilliseconds = roundTripVariationMilliseconds
+    }
+}
+
 public struct MoshTaskSessionTimer: MoshSessionTimer {
     public init() {}
 
@@ -59,6 +123,7 @@ public struct MoshSessionConfiguration: Sendable {
     public var maximumSerializedFragmentByteCount: Int
     public var chaffSource: MoshSSPChaffSource
     public var predictionConfiguration: MoshPredictionConfiguration
+    public var resilience: MoshSessionResilienceConfiguration
 
     public init(
         endpoint: MoshEndpoint,
@@ -67,9 +132,10 @@ public struct MoshSessionConfiguration: Sendable {
         clock: any MoshMillisecondsClock = MoshSystemMillisecondsClock(),
         timer: any MoshSessionTimer = MoshTaskSessionTimer(),
         timing: MoshSSPSendTimingConfiguration = MoshSSPSendTimingConfiguration(),
-        maximumSerializedFragmentByteCount: Int = 1_280,
+        maximumSerializedFragmentByteCount: Int = MoshSSPDatagramBudget.defaultMaximumSerializedFragmentByteCount,
         chaffSource: MoshSSPChaffSource = .random,
-        predictionConfiguration: MoshPredictionConfiguration = MoshPredictionConfiguration()
+        predictionConfiguration: MoshPredictionConfiguration = MoshPredictionConfiguration(),
+        resilience: MoshSessionResilienceConfiguration = MoshSessionResilienceConfiguration()
     ) {
         self.endpoint = endpoint
         self.initialTerminalDimensions = initialTerminalDimensions
@@ -80,6 +146,7 @@ public struct MoshSessionConfiguration: Sendable {
         self.maximumSerializedFragmentByteCount = maximumSerializedFragmentByteCount
         self.chaffSource = chaffSource
         self.predictionConfiguration = predictionConfiguration
+        self.resilience = resilience
     }
 }
 
@@ -136,6 +203,18 @@ public enum MoshSessionEvent: Equatable, Sendable {
     /// then finishes its streams cleanly. Distinct from `.stopped`, which is the
     /// generic terminal event for any stop path.
     case peerShutdown
+    /// The underlying transport failed and the session is attempting to rebuild the
+    /// datagram link (new local socket / port hop) while preserving the same crypto
+    /// session and SSP state. `attempt` counts from 1. Recovery is automatic; the
+    /// session is NOT torn down while reconnecting.
+    case reconnecting(attempt: Int)
+    /// A fresh datagram link was successfully installed after a transport failure;
+    /// unacknowledged state will be retransmitted over it.
+    case reconnected
+    /// The server has not been heard from for at least the configured no-contact
+    /// threshold. Informational (for "last contact Ns ago" rendering); emitted once
+    /// per outage and does NOT tear the session down.
+    case noContact(millisecondsSinceLastHeard: UInt64)
     case stopped
 }
 
@@ -160,8 +239,12 @@ public actor MoshSession {
     private var runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>?
     private var receiveTask: Task<Void, Never>?
     private var maintenanceTask: Task<Void, Never>?
+    private var linkEventTask: Task<Void, Never>?
     private var maintenanceGeneration: UInt64 = 0
     private var lastAdoptedHostStateNumber: UInt64 = 0
+    private var startedAtMilliseconds: UInt64 = 0
+    private var isRebuildingLink = false
+    private var hasEmittedNoContact = false
     private var nextStopWaiterID: UInt64 = 0
     private var stopWaiters: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var cancelledStopWaiterIDs: Set<UInt64> = []
@@ -203,6 +286,7 @@ public actor MoshSession {
     deinit {
         self.receiveTask?.cancel()
         self.maintenanceTask?.cancel()
+        self.linkEventTask?.cancel()
         self.hostOperationContinuation.finish()
         self.renderOperationContinuation.finish()
         self.diagnosticEventContinuation.finish()
@@ -210,6 +294,26 @@ public actor MoshSession {
 
     public var snapshot: MoshTerminalSnapshot {
         self.terminalEngine.snapshot
+    }
+
+    /// Host-visible liveness: when the server was last heard from, how long ago,
+    /// and the current round-trip estimates. Lets a host render "last contact Ns
+    /// ago" and latency. Informational — reading it never affects the session.
+    public var liveness: MoshSessionLiveness {
+        get async {
+            let nowMilliseconds = await self.configuration.clock.nowMilliseconds()
+            let lastHeard = await self.runtime?.lastHeardAtMilliseconds()
+            let reference = lastHeard ?? self.startedAtMilliseconds
+            let sinceLastHeard = nowMilliseconds >= reference ? nowMilliseconds - reference : 0
+            let smoothedRoundTrip = await self.runtime?.smoothedRoundTripMilliseconds() ?? 0
+            let roundTripVariation = await self.runtime?.roundTripVariationMilliseconds() ?? 0
+            return MoshSessionLiveness(
+                lastHeardFromServerMilliseconds: lastHeard,
+                millisecondsSinceLastHeard: sinceLastHeard,
+                smoothedRoundTripMilliseconds: smoothedRoundTrip,
+                roundTripVariationMilliseconds: roundTripVariation
+            )
+        }
     }
 
     public var screenSnapshot: MoshTerminalScreenSnapshot {
@@ -268,7 +372,10 @@ public actor MoshSession {
 
             self.runtime = runtime
             self.isStarted = true
+            self.startedAtMilliseconds = initialNowMilliseconds
+            self.hasEmittedNoContact = false
             self.startReceiveTask(runtime: runtime)
+            self.startLinkEventTask(runtime: runtime)
             self.diagnosticEventContinuation.yield(
                 .started(
                     host: self.configuration.endpoint.host,
@@ -295,6 +402,8 @@ public actor MoshSession {
         self.receiveTask = nil
         self.maintenanceTask?.cancel()
         self.maintenanceTask = nil
+        self.linkEventTask?.cancel()
+        self.linkEventTask = nil
         await self.runtime?.stop()
         self.runtime = nil
         self.hostOperationContinuation.finish()
@@ -422,6 +531,9 @@ public actor MoshSession {
     private func handleIncomingInstruction(
         _ instruction: MoshSSPDatagramIncomingInstruction<MoshTerminalHostState>
     ) async throws {
+        // Any received instruction is fresh contact with the server: clear the
+        // no-contact latch so a subsequent outage re-emits the diagnostic.
+        self.hasEmittedNoContact = false
         let state = instruction.instructionResult.latestState
         // Adopt the newest received framebuffer wholesale (mirrors stmclient.cc's
         // `new_state = network->get_latest_remote_state().state.get_fb()`) instead
@@ -492,6 +604,8 @@ public actor MoshSession {
         self.maintenanceGeneration &+= 1
         self.maintenanceTask?.cancel()
         self.maintenanceTask = nil
+        self.linkEventTask?.cancel()
+        self.linkEventTask = nil
         await self.runtime?.stop()
         self.runtime = nil
         if let error {
@@ -521,6 +635,8 @@ public actor MoshSession {
         self.receiveTask = nil
         self.maintenanceTask?.cancel()
         self.maintenanceTask = nil
+        self.linkEventTask?.cancel()
+        self.linkEventTask = nil
         await runtime.stop()
         self.runtime = nil
         self.hostOperationContinuation.finish(throwing: error)
@@ -542,6 +658,8 @@ public actor MoshSession {
         self.receiveTask = nil
         self.maintenanceTask?.cancel()
         self.maintenanceTask = nil
+        self.linkEventTask?.cancel()
+        self.linkEventTask = nil
         await self.runtime?.stop()
         self.runtime = nil
         self.hostOperationContinuation.finish(throwing: error)
@@ -607,6 +725,8 @@ public actor MoshSession {
         self.receiveTask?.cancel()
         self.receiveTask = nil
         self.maintenanceTask = nil
+        self.linkEventTask?.cancel()
+        self.linkEventTask = nil
         await self.runtime?.stop()
         self.runtime = nil
         self.hostOperationContinuation.finish(throwing: error)
@@ -648,6 +768,149 @@ public actor MoshSession {
         }
     }
 
+    /// Listen for the runtime's out-of-band transport-lifecycle signals. On a
+    /// `.linkFailed`, drive the bounded rebuild policy. The runtime keeps its crypto
+    /// session and SSP state alive across the failure, so a successful rebuild
+    /// resumes the SAME session on a fresh socket.
+    private func startLinkEventTask(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
+    ) {
+        let linkEvents = runtime.linkEvents
+        self.linkEventTask = Task { [weak self] in
+            for await event in linkEvents {
+                guard let self else {
+                    return
+                }
+                switch event {
+                case .linkFailed:
+                    await self.rebuildLink(runtime: runtime)
+                }
+            }
+        }
+    }
+
+    /// Bounded, backed-off automatic link rebuild after transport death. Mirrors
+    /// official Mosh's port hop (`Connection::hop_port`): a new socket is opened to
+    /// the same endpoint while the crypto session and send sequence continue
+    /// unchanged (`runtime.replaceLink` preserves the `~Copyable` sequencer). The
+    /// SSP retransmit timer then re-sends unacknowledged state over the new link.
+    private func rebuildLink(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
+    ) async {
+        guard self.isStarted, self.isStopped == false else {
+            return
+        }
+        // Serialize: a second `.linkFailed` while a rebuild is in flight is ignored.
+        guard self.isRebuildingLink == false else {
+            return
+        }
+        self.isRebuildingLink = true
+        defer { self.isRebuildingLink = false }
+
+        var attempt = 0
+        while self.isStarted, self.isStopped == false {
+            attempt += 1
+            self.diagnosticEventContinuation.yield(.reconnecting(attempt: attempt))
+            do {
+                let newLink = try await self.configuration.transportFactory.makeDatagramLink(
+                    for: self.configuration.endpoint
+                )
+                try Task.checkCancellation()
+                guard self.isStarted, self.isStopped == false else {
+                    await newLink.stop()
+                    return
+                }
+                try await runtime.replaceLink(newLink)
+                self.diagnosticEventContinuation.yield(.reconnected)
+                self.hasEmittedNoContact = false
+                // Resume the maintenance/retransmit loop against the new link.
+                self.restartMaintenanceTask(runtime: runtime)
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                if let maximumAttempts = self.configuration.resilience.maximumLinkRebuildAttempts,
+                   attempt >= maximumAttempts {
+                    await self.finishFromLinkRebuildFailure(throwing: error)
+                    return
+                }
+                let backoffMilliseconds = self.rebuildBackoffMilliseconds(attempt: attempt)
+                do {
+                    try await self.configuration.timer.sleep(forMilliseconds: backoffMilliseconds)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func rebuildBackoffMilliseconds(attempt: Int) -> UInt64 {
+        let resilience = self.configuration.resilience
+        let exponent = max(0, attempt - 1)
+        var backoff = resilience.initialRebuildBackoffMilliseconds
+        for _ in 0..<exponent {
+            if backoff >= resilience.maximumRebuildBackoffMilliseconds / 2 {
+                return resilience.maximumRebuildBackoffMilliseconds
+            }
+            backoff *= 2
+        }
+        return min(backoff, resilience.maximumRebuildBackoffMilliseconds)
+    }
+
+    private func finishFromLinkRebuildFailure(throwing error: Error) async {
+        guard self.isStopped == false else {
+            return
+        }
+
+        self.isStopped = true
+        self.isStarted = false
+        self.maintenanceGeneration &+= 1
+        self.receiveTask?.cancel()
+        self.receiveTask = nil
+        self.maintenanceTask?.cancel()
+        self.maintenanceTask = nil
+        self.linkEventTask?.cancel()
+        self.linkEventTask = nil
+        await self.runtime?.stop()
+        self.runtime = nil
+        self.hostOperationContinuation.finish(throwing: error)
+        self.renderOperationContinuation.finish(throwing: error)
+        self.finishStopWaiters(throwing: error)
+        self.diagnosticEventContinuation.yield(.stopped)
+        self.diagnosticEventContinuation.finish()
+    }
+
+    /// Emit a single informational `.noContact` diagnostic when the server has not
+    /// been heard from for at least the configured threshold. Latched so at most one
+    /// event fires per outage; reset once contact resumes (`handleIncomingInstruction`,
+    /// `rebuildLink`). Never tears the session down.
+    private func emitNoContactIfNeeded(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
+    ) async {
+        guard self.hasEmittedNoContact == false, self.isStarted, self.isStopped == false else {
+            return
+        }
+        let threshold = self.configuration.resilience.noContactThresholdMilliseconds
+        guard threshold > 0 else {
+            return
+        }
+
+        let nowMilliseconds = await self.configuration.clock.nowMilliseconds()
+        let reference = await runtime.lastHeardAtMilliseconds() ?? self.startedAtMilliseconds
+        guard nowMilliseconds >= reference else {
+            return
+        }
+        let sinceLastHeard = nowMilliseconds - reference
+        guard sinceLastHeard >= threshold else {
+            return
+        }
+
+        self.hasEmittedNoContact = true
+        self.diagnosticEventContinuation.yield(
+            .noContact(millisecondsSinceLastHeard: sinceLastHeard)
+        )
+    }
+
     private func restartMaintenanceTask(
         runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
     ) {
@@ -687,6 +950,7 @@ public actor MoshSession {
                 }
 
                 let sentDatagram = try await self.sendDueDatagrams()
+                await self.emitNoContactIfNeeded(runtime: runtime)
                 if sentDatagram == false, waitMilliseconds == 0 {
                     guard self.shouldContinueMaintenance(generation: generation) else {
                         return

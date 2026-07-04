@@ -25,6 +25,19 @@ public enum MoshSSPDatagramRuntimeError: Error, Equatable, Sendable {
     case stopped
 }
 
+public enum MoshSSPDatagramRuntimeLinkEvent: Equatable, Sendable {
+    /// The datagram link's incoming stream terminated with an error: the underlying
+    /// transport died (e.g. an `NWConnection` reached `.failed`, or an injected
+    /// transport failure fired). The runtime deliberately does NOT tear itself down
+    /// on this signal — it keeps the crypto session (`MoshDatagramSequencer`), the
+    /// SSP loop/state, and the `incomingInstructions` stream intact, and stops only
+    /// the dead link. The owner should install a fresh link with `replaceLink(_:)`
+    /// to resume against the same session (see `MoshSession`'s bounded rebuild).
+    /// Carries the failure's textual description because `Error` is neither
+    /// `Equatable` nor reliably `Sendable`.
+    case linkFailed(String)
+}
+
 public struct MoshSSPDatagramOutgoingPacket: Equatable, Sendable {
     public let packet: MoshSSPOutgoingPacket
     public let datagram: [UInt8]
@@ -79,13 +92,28 @@ public actor MoshSSPDatagramRuntime<
     >
 
     public nonisolated let incomingInstructions: IncomingInstructionStream
+    /// Out-of-band transport-lifecycle signals (currently `.linkFailed`). Distinct
+    /// from `incomingInstructions`, which stays open across a link failure so the
+    /// same session can be resumed on a fresh link.
+    public nonisolated let linkEvents: AsyncStream<MoshSSPDatagramRuntimeLinkEvent>
 
-    private let link: any MoshDatagramLink
+    private var link: any MoshDatagramLink
     private let clock: any MoshMillisecondsClock
     private let incomingContinuation: IncomingInstructionStream.Continuation
+    private let linkEventContinuation: AsyncStream<MoshSSPDatagramRuntimeLinkEvent>.Continuation
     private var loop: MoshSSPInMemoryLoop<SendState, ReceiveState>
     private var sequencer: MoshDatagramSequencer
     private var receiveTask: Task<Void, Never>?
+    /// Monotonic tag identifying the currently-installed link's receive task. A
+    /// link swap (`replaceLink`) or teardown bumps it so the previous receive
+    /// task's completion handler becomes a no-op and cannot finish or fail the
+    /// runtime out from under the new link.
+    private var receiveGeneration: UInt64 = 0
+    /// Description of the most recent transient `link.send` failure that was
+    /// recorded rather than propagated. Mirrors official Mosh
+    /// `Connection::send_error` (`network/network.cc` ~378-386): informational, and
+    /// cleared once a send succeeds.
+    private var recordedSendErrorDescription: String?
     private var isStarted = false
     private var isStopped = false
 
@@ -99,14 +127,26 @@ public actor MoshSSPDatagramRuntime<
         let streamAndContinuation = Self.makeIncomingInstructionStream(bufferingPolicy: bufferingPolicy)
         self.incomingInstructions = streamAndContinuation.stream
         self.incomingContinuation = streamAndContinuation.continuation
+        let linkEventStreamAndContinuation = Self.makeLinkEventStream()
+        self.linkEvents = linkEventStreamAndContinuation.stream
+        self.linkEventContinuation = linkEventStreamAndContinuation.continuation
         self.loop = loop
         self.sequencer = sequencer
         self.link = link
         self.clock = clock
     }
 
+    /// Even if the runtime is abandoned without an explicit `stop()`, cancel the
+    /// receive task and stop the current link so its underlying socket cannot leak.
+    /// `deinit` cannot `await`, so the async `stop()` is driven from a detached task
+    /// that owns the link for the duration; `stop()` is idempotent.
     deinit {
         self.receiveTask?.cancel()
+        self.linkEventContinuation.finish()
+        if self.isStopped == false {
+            let link = self.link
+            Task { await link.stop() }
+        }
     }
 
     public func start() async throws {
@@ -122,16 +162,50 @@ public actor MoshSSPDatagramRuntime<
         self.startReceiveTask()
     }
 
+    /// Swap in a fresh datagram link WITHOUT resetting the crypto session.
+    ///
+    /// This is the core of transport-death resilience (client port hop / NAT
+    /// rebind / Wi-Fi↔cellular). The old link is torn down and a new one installed
+    /// in place, but the `MoshDatagramSequencer` (OCB key AND monotonic send
+    /// sequence) and the SSP loop/state are untouched — they are stored properties
+    /// of this actor and are never read out, copied, or forked across the swap.
+    /// Because the sequencer is `~Copyable` and owned here throughout, the first
+    /// datagram sealed on the NEW link necessarily carries the NEXT send sequence,
+    /// never 0. Resetting it would reuse nonces under the same key and destroy OCB
+    /// confidentiality and authenticity. This mirrors official Mosh, whose
+    /// `Connection::hop_port` opens a new socket while the same `Session`/OCB key
+    /// and `direction_seq` continue unchanged (`network/network.cc` ~116-125).
+    ///
+    /// The receive generation is bumped BEFORE the old link is stopped so the old
+    /// receive task's terminal handler (which fires when its stream ends) is a
+    /// no-op and cannot finish/fail the runtime. The `incomingInstructions` and
+    /// `linkEvents` streams stay open across the swap.
+    public func replaceLink(_ newLink: any MoshDatagramLink) async throws {
+        try self.requireStarted()
+
+        self.receiveGeneration &+= 1
+        self.receiveTask?.cancel()
+        self.receiveTask = nil
+        await self.link.stop()
+
+        self.link = newLink
+        self.recordedSendErrorDescription = nil
+        try await newLink.start()
+        self.startReceiveTask()
+    }
+
     public func stop() async {
         guard self.isStopped == false else {
             return
         }
 
         self.isStopped = true
+        self.receiveGeneration &+= 1
         self.receiveTask?.cancel()
         self.receiveTask = nil
         await self.link.stop()
         self.incomingContinuation.finish()
+        self.linkEventContinuation.finish()
     }
 
     public func setCurrentState(_ state: SendState) async {
@@ -171,13 +245,36 @@ public actor MoshSSPDatagramRuntime<
             return nil
         }
 
+        // Seal is FATAL on throw. `MoshDatagramSequencer.seal` only throws when the
+        // send sequence space or the per-key OCB block budget is exhausted
+        // (`sendSequenceExhausted` / `blockEncryptionLimitReached`); both are
+        // fail-closed, session-ending crypto conditions that must NOT be swallowed.
+        // Sealing here (before any send) also advances the nonce/block counters
+        // exactly once per transmission, so a retransmit rides a fresh nonce — the
+        // same ordering official Mosh uses (`session.encrypt` precedes `sendto`).
         let packets = try batch.packets.map { packet in
             let datagram = try self.sequencer.seal(plaintext: packet.plaintext.serializedBytes())
             return MoshSSPDatagramOutgoingPacket(packet: packet, datagram: datagram)
         }
 
+        // Send is TRANSIENT on throw. A failed `link.send` (ENETDOWN/EHOSTUNREACH
+        // on a network transition, or a link that is momentarily down/rebuilding)
+        // must not fail the session: official Mosh's `Connection::send` records the
+        // errno into `send_error` and RETURNS (`network/network.cc` ~372-386). The
+        // datagram is already accounted as sent by the SSP sender, so its
+        // retransmit timer re-sends the still-unacknowledged state once
+        // connectivity returns — recovery is automatic. We only classify precisely:
+        // cooperative cancellation still propagates; every other error at this
+        // transport boundary is recorded and swallowed.
         for packet in packets {
-            try await self.link.send(packet.datagram)
+            do {
+                try await self.link.send(packet.datagram)
+                self.recordedSendErrorDescription = nil
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                self.recordedSendErrorDescription = String(describing: error)
+            }
         }
 
         return MoshSSPDatagramOutgoingBatch(sspBatch: batch, packets: packets)
@@ -256,6 +353,35 @@ public actor MoshSSPDatagramRuntime<
         self.loop.shutdownAcknowledged
     }
 
+    /// The sequence number the NEXT sealed datagram will carry. Borrows the
+    /// runtime-owned `~Copyable` sequencer in place (no copy/fork). Used to prove
+    /// send-sequence continuity across a `replaceLink` swap: it must not reset.
+    public func nextSequenceToSend() -> UInt64 {
+        self.sequencer.nextSequenceToSend
+    }
+
+    /// Clock time (ms) at which the peer was last heard from, or `nil` before first
+    /// contact. Informational liveness signal.
+    public func lastHeardAtMilliseconds() -> UInt64? {
+        self.loop.lastHeardAtMilliseconds
+    }
+
+    /// Smoothed round-trip time estimate (ms).
+    public func smoothedRoundTripMilliseconds() -> Double {
+        self.loop.smoothedRoundTripMilliseconds
+    }
+
+    /// Round-trip time variation estimate (ms).
+    public func roundTripVariationMilliseconds() -> Double {
+        self.loop.roundTripVariationMilliseconds
+    }
+
+    /// Description of the most recent recorded-but-swallowed `link.send` failure,
+    /// or `nil` if the last send succeeded. Mirrors official `Connection::send_error`.
+    public func recordedSendError() -> String? {
+        self.recordedSendErrorDescription
+    }
+
     private func requireStarted() throws {
         guard self.isStopped == false else {
             throw MoshSSPDatagramRuntimeError.stopped
@@ -267,6 +393,7 @@ public actor MoshSSPDatagramRuntime<
 
     private func startReceiveTask() {
         let stream = self.link.incomingDatagrams
+        let generation = self.receiveGeneration
         self.receiveTask = Task { [weak self] in
             do {
                 for try await datagram in stream {
@@ -280,25 +407,34 @@ public actor MoshSSPDatagramRuntime<
                         throw CancellationError()
                     } catch {
                         guard Self.isPacketLocalDatagramError(error) else {
-                            throw error
+                            // A non-transient error while PROCESSING a datagram
+                            // (e.g. malformed wire/fragment) is fatal and owned by
+                            // this runtime — finish with the error rather than
+                            // treating it as transport death.
+                            await self.finishFromReceiveTask(throwing: error, generation: generation)
+                            return
                         }
                     }
                 }
 
+                // The incoming stream ended cleanly (nil): the link was stopped
+                // without a fault. Finish the runtime as before.
                 guard let self else {
                     return
                 }
-                await self.finishFromReceiveTask(throwing: nil)
+                await self.finishFromReceiveTask(throwing: nil, generation: generation)
             } catch is CancellationError {
-                guard let self else {
-                    return
-                }
-                await self.finishFromReceiveTask(throwing: nil)
+                // The task was cancelled by `replaceLink`/`stop`, both of which own
+                // their own teardown. Do nothing here.
+                return
             } catch {
+                // The incoming datagram STREAM itself faulted: the transport died
+                // (NWConnection `.failed`, injected transport failure). Keep the
+                // crypto session and SSP state; surface for a link rebuild.
                 guard let self else {
                     return
                 }
-                await self.finishFromReceiveTask(throwing: error)
+                await self.handleLinkFailure(error, generation: generation)
             }
         }
     }
@@ -326,12 +462,13 @@ public actor MoshSSPDatagramRuntime<
         }
     }
 
-    private func finishFromReceiveTask(throwing error: Error?) async {
-        guard self.isStopped == false else {
+    private func finishFromReceiveTask(throwing error: Error?, generation: UInt64) async {
+        guard self.receiveGeneration == generation, self.isStopped == false else {
             return
         }
 
         self.isStopped = true
+        self.receiveGeneration &+= 1
         self.receiveTask = nil
         await self.link.stop()
         if let error {
@@ -339,6 +476,25 @@ public actor MoshSSPDatagramRuntime<
         } else {
             self.incomingContinuation.finish()
         }
+        self.linkEventContinuation.finish()
+    }
+
+    /// The current link's incoming stream faulted. Unlike `finishFromReceiveTask`,
+    /// this preserves the runtime: `incomingInstructions` stays open, the SSP loop
+    /// and `~Copyable` sequencer are untouched, and only the dead link is stopped.
+    /// A `.linkFailed` event is surfaced so the owner can install a fresh link with
+    /// `replaceLink(_:)`. The receive generation is bumped so this defunct task can
+    /// no longer act on the runtime.
+    private func handleLinkFailure(_ error: Error, generation: UInt64) async {
+        guard self.receiveGeneration == generation, self.isStopped == false else {
+            return
+        }
+
+        self.receiveGeneration &+= 1
+        self.receiveTask = nil
+        let deadLink = self.link
+        self.linkEventContinuation.yield(.linkFailed(String(describing: error)))
+        await deadLink.stop()
     }
 
     private static func makeIncomingInstructionStream(
@@ -351,6 +507,24 @@ public actor MoshSSPDatagramRuntime<
 
         guard let capturedContinuation else {
             preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+
+        return (stream, capturedContinuation)
+    }
+
+    private static func makeLinkEventStream() -> (
+        stream: AsyncStream<MoshSSPDatagramRuntimeLinkEvent>,
+        continuation: AsyncStream<MoshSSPDatagramRuntimeLinkEvent>.Continuation
+    ) {
+        var capturedContinuation: AsyncStream<MoshSSPDatagramRuntimeLinkEvent>.Continuation?
+        let stream = AsyncStream<MoshSSPDatagramRuntimeLinkEvent>(
+            bufferingPolicy: .bufferingNewest(16)
+        ) { continuation in
+            capturedContinuation = continuation
+        }
+
+        guard let capturedContinuation else {
+            preconditionFailure("AsyncStream did not provide a continuation")
         }
 
         return (stream, capturedContinuation)

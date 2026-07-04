@@ -900,8 +900,14 @@ struct MoshSessionTests {
         await fixture.serverRuntime.stop()
     }
 
+    // A transient `link.send` failure during start (here every send fails) must
+    // NOT tear the session down. This asserts defect-A send tolerance: official
+    // Mosh's `Connection::send` records the error and returns, and the SSP
+    // retransmit timer re-sends once connectivity returns. (Rewritten: this test
+    // previously encoded the pre-fix behavior in which a `NWConnection.send` error
+    // on a network transition killed the whole session.)
     @Test
-    func startFailureAfterRuntimeStartStopsSessionAndFinishesStreams() async throws {
+    func transientSendFailureAtStartKeepsSessionAlive() async throws {
         let failingLink = FailingSendDatagramLink(sendError: .notConnected)
         let sessionKey = try MoshSessionKey(rawBytes: sessionKeyBytes)
         let endpoint = MoshEndpoint(host: "localhost", port: 60_001, sessionKey: sessionKey)
@@ -911,7 +917,7 @@ struct MoshSessionTests {
                 initialTerminalDimensions: try MoshTerminalDimensions(columns: 80, rows: 24),
                 transportFactory: FailingSendTransportFactory(link: failingLink),
                 timing: MoshSSPSendTimingConfiguration(
-                    sendIntervalMilliseconds: 0,
+                    sendIntervalMilliseconds: 20,
                     acknowledgementIntervalMilliseconds: 1_000,
                     activeRetryTimeoutMilliseconds: 10_000,
                     sendMinimumDelayMilliseconds: 0,
@@ -921,60 +927,72 @@ struct MoshSessionTests {
                 chaffSource: .none
             )
         )
-        let hostFailureTask = collectStreamFailure(from: session.hostOperations)
-        let renderFailureTask = collectStreamFailure(from: session.renderOperations)
         let diagnosticEventTask = collectEvents(from: session, count: 2)
 
         do {
+            // The initial resize send fails transiently, but start must succeed and
+            // the session must stay alive.
             try await session.start()
-            Issue.record("Expected start to fail after the datagram link rejected send.")
-        } catch let error as MoshDatagramTransportError {
-            #expect(error == .notConnected)
-        } catch {
-            Issue.record("Expected MoshDatagramTransportError.notConnected, received \(error).")
-        }
 
-        let diagnosticEvents = try await withSessionTimeout {
-            await diagnosticEventTask.value
-        }
-        let hostFailure = try await withSessionTimeout {
-            await hostFailureTask.value
-        }
-        let renderFailure = try await withSessionTimeout {
-            await renderFailureTask.value
-        }
+            let diagnosticEvents = try await withSessionTimeout {
+                await diagnosticEventTask.value
+            }
+            // The batch was still produced and accounted (SSP will retransmit); the
+            // failure is recorded, not fatal.
+            #expect(diagnosticEvents == [
+                .started(host: endpoint.host, port: endpoint.port),
+                .datagramsSent(packetCount: 1),
+            ])
 
-        #expect(diagnosticEvents == [.started(host: endpoint.host, port: endpoint.port), .stopped])
-        #expect((hostFailure as? MoshDatagramTransportError) == .notConnected)
-        #expect((renderFailure as? MoshDatagramTransportError) == .notConnected)
-        #expect(await failingLink.stopCount() == 1)
-        await expectSessionError(.stopped) {
+            // The session is not stopped: a further keystroke is accepted (it does
+            // not throw `.stopped`), proving the session survived the send failure.
             try await session.sendKeystrokes([0x61])
+
+            await session.stop()
+        } catch {
+            diagnosticEventTask.cancel()
+            await session.stop()
+            throw error
         }
     }
 
+    // A transport (incoming stream) failure must NOT immediately finish the
+    // session; it must drive the bounded automatic link-rebuild policy. When the
+    // replacement links are unavailable (their `start` keeps failing), the session
+    // reconnects up to the configured attempt limit and only then tears down.
+    // (Rewritten: previously a single incoming failure finished the streams; that
+    // is exactly the transport-death fragility defect B removes.)
     @Test
-    func receiveTaskFailureStopsRuntimeAndFinishesStreams() async throws {
+    func receiveFailureDrivesBoundedRebuildThenTearsDownWhenUnavailable() async throws {
         let incomingError = MoshDatagramTransportError.notConnected
-        let link = IncomingFailureDatagramLink()
+        let initialLink = IncomingFailureDatagramLink()
+        let factory = SequencedRebuildTransportFactory(
+            initialLink: initialLink,
+            rebuildError: .notConnected
+        )
         let sessionKey = try MoshSessionKey(rawBytes: sessionKeyBytes)
         let endpoint = MoshEndpoint(host: "localhost", port: 60_001, sessionKey: sessionKey)
         let session = MoshSession(
             configuration: MoshSessionConfiguration(
                 endpoint: endpoint,
                 initialTerminalDimensions: try MoshTerminalDimensions(columns: 80, rows: 24),
-                transportFactory: IncomingFailureTransportFactory(link: link),
-                chaffSource: .none
+                transportFactory: factory,
+                chaffSource: .none,
+                resilience: MoshSessionResilienceConfiguration(
+                    maximumLinkRebuildAttempts: 2,
+                    initialRebuildBackoffMilliseconds: 1,
+                    maximumRebuildBackoffMilliseconds: 2
+                )
             )
         )
         let hostFailureTask = collectStreamFailure(from: session.hostOperations)
         let renderFailureTask = collectStreamFailure(from: session.renderOperations)
-        let diagnosticEventTask = collectEvents(from: session, count: 2)
+        let diagnosticEventTask = collectEvents(from: session, count: 5)
 
         do {
             try await session.start()
             try await Task.sleep(for: .milliseconds(10))
-            await link.failIncoming(throwing: incomingError)
+            await initialLink.failIncoming(throwing: incomingError)
 
             let hostFailure = try await withSessionTimeout {
                 await hostFailureTask.value
@@ -986,15 +1004,15 @@ struct MoshSessionTests {
                 await diagnosticEventTask.value
             }
 
-            #expect((hostFailure as? MoshDatagramTransportError) == incomingError)
-            #expect((renderFailure as? MoshDatagramTransportError) == incomingError)
-            #expect(
-                diagnosticEvents == [
-                    .started(host: endpoint.host, port: endpoint.port),
-                    .stopped,
-                ]
-            )
-            #expect(await link.stopCount() == 1)
+            // The two bounded rebuild attempts are surfaced before teardown.
+            #expect(diagnosticEvents.contains(.reconnecting(attempt: 1)))
+            #expect(diagnosticEvents.contains(.reconnecting(attempt: 2)))
+            #expect(diagnosticEvents.last == .stopped)
+            // Both attempts asked the factory for a fresh link.
+            #expect(await factory.rebuildRequestCount() == 2)
+            // Streams finish with the exhausting error.
+            #expect((hostFailure as? MoshDatagramTransportError) == .notConnected)
+            #expect((renderFailure as? MoshDatagramTransportError) == .notConnected)
             await expectSessionError(.stopped) {
                 try await session.sendKeystrokes([0x61])
             }
@@ -1007,8 +1025,12 @@ struct MoshSessionTests {
         }
     }
 
+    // A transient `link.send` failure while sending a keystroke must NOT throw out
+    // of `sendKeystrokes` or tear the session down. (Rewritten: previously this
+    // asserted the pre-fix behavior that such a send error finished the streams and
+    // stopped the runtime.)
     @Test
-    func userSendFailureStopsRuntimeAndFinishesStreams() async throws {
+    func transientSendFailureDuringKeystrokesKeepsSessionAlive() async throws {
         let sendError = MoshDatagramTransportError.notConnected
         let link = FailingAfterSendDatagramLink(failOnSendNumber: 2, sendError: sendError)
         let sessionKey = try MoshSessionKey(rawBytes: sessionKeyBytes)
@@ -1019,7 +1041,7 @@ struct MoshSessionTests {
                 initialTerminalDimensions: try MoshTerminalDimensions(columns: 80, rows: 24),
                 transportFactory: FailingAfterSendTransportFactory(link: link),
                 timing: MoshSSPSendTimingConfiguration(
-                    sendIntervalMilliseconds: 0,
+                    sendIntervalMilliseconds: 20,
                     acknowledgementIntervalMilliseconds: 1_000,
                     activeRetryTimeoutMilliseconds: 10_000,
                     sendMinimumDelayMilliseconds: 0,
@@ -1029,41 +1051,27 @@ struct MoshSessionTests {
                 chaffSource: .none
             )
         )
-        let hostFailureTask = collectStreamFailure(from: session.hostOperations)
-        let renderFailureTask = collectStreamFailure(from: session.renderOperations)
-        let diagnosticEventTask = collectEvents(from: session, count: 3)
+        let diagnosticEventTask = collectEvents(from: session, count: 2)
 
         do {
             try await session.start()
-            do {
-                try await session.sendKeystrokes([0x61])
-                Issue.record("Expected sendKeystrokes to fail after the datagram link rejected send.")
-            } catch let error as MoshDatagramTransportError {
-                #expect(error == sendError)
-            } catch {
-                Issue.record("Expected MoshDatagramTransportError.notConnected, received \(error).")
-            }
+
+            // The second send (this keystroke) fails at the link; it must be
+            // recorded and swallowed, not thrown.
+            try await session.sendKeystrokes([0x61])
 
             let diagnosticEvents = try await withSessionTimeout {
                 await diagnosticEventTask.value
             }
-            let hostFailure = try await withSessionTimeout {
-                await hostFailureTask.value
-            }
-            let renderFailure = try await withSessionTimeout {
-                await renderFailureTask.value
-            }
+            #expect(diagnosticEvents.first == .started(host: endpoint.host, port: endpoint.port))
+            // No `.stopped` yet: the session survived the failed keystroke send.
+            #expect(diagnosticEvents.contains(.stopped) == false)
 
-            #expect(diagnosticEvents == [.started(host: endpoint.host, port: endpoint.port), .datagramsSent(packetCount: 1), .stopped])
-            #expect((hostFailure as? MoshDatagramTransportError) == sendError)
-            #expect((renderFailure as? MoshDatagramTransportError) == sendError)
-            #expect(await link.stopCount() == 1)
-            await expectSessionError(.stopped) {
-                try await session.sendKeystrokes([0x62])
-            }
+            // Still usable.
+            try await session.sendKeystrokes([0x62])
+
+            await session.stop()
         } catch {
-            hostFailureTask.cancel()
-            renderFailureTask.cancel()
             diagnosticEventTask.cancel()
             await session.stop()
             throw error
@@ -1482,6 +1490,147 @@ struct MoshSessionTests {
             throw error
         }
     }
+
+    // Defect D: the host-visible liveness API reports last-heard and round-trip
+    // estimates and updates as datagrams arrive; crossing the no-contact threshold
+    // emits a single informational `.noContact` diagnostic without tearing the
+    // session down.
+    @Test
+    func livenessReportsLastHeardAndEmitsNoContactAfterThreshold() async throws {
+        let timing = MoshSSPSendTimingConfiguration(
+            sendIntervalMilliseconds: 0,
+            acknowledgementIntervalMilliseconds: 1_000,
+            sendMinimumDelayMilliseconds: 0
+        )
+        let fixture = try await makeSessionFixture(
+            columns: 80,
+            rows: 24,
+            timing: timing,
+            resilience: MoshSessionResilienceConfiguration(noContactThresholdMilliseconds: 5_000)
+        )
+        let hostOperationTask = collectHostOperations(from: fixture.session, count: 1)
+        let noContactEventTask = Task<MoshSessionEvent?, Never> {
+            for await event in fixture.session.diagnosticEvents {
+                if case .noContact = event {
+                    return event
+                }
+                if event == .stopped {
+                    return nil
+                }
+            }
+            return nil
+        }
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            // Before any contact, liveness reports never-heard.
+            let initialLiveness = await fixture.session.liveness
+            #expect(initialLiveness.lastHeardFromServerMilliseconds == nil)
+
+            // Server sends a state at clock 0; the client hears it.
+            var hostState = MoshTerminalHostState()
+            hostState.append(.write(MoshTerminalOutput(bytes: [0x48])))
+            await fixture.serverRuntime.setCurrentState(hostState)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+            _ = try await withSessionTimeout {
+                try await hostOperationTask.value
+            }
+
+            // Liveness now reflects the contact at clock 0.
+            let heardLiveness = await fixture.session.liveness
+            #expect(heardLiveness.lastHeardFromServerMilliseconds == 0)
+            #expect(heardLiveness.millisecondsSinceLastHeard == 0)
+            #expect(heardLiveness.smoothedRoundTripMilliseconds >= 0)
+
+            // Advance well past the no-contact threshold with no further contact and
+            // pump the maintenance loop; it must emit `.noContact`.
+            await fixture.clock.advance(byMilliseconds: 6_000)
+            for _ in 0..<4 {
+                await fixture.timer.resumeNextSleep()
+                _ = try? await withSessionTimeout(after: .seconds(1)) {
+                    try await fixture.timer.nextSleepRequest()
+                }
+            }
+
+            let noContactEvent = try await withSessionTimeout {
+                await noContactEventTask.value
+            }
+            #expect(noContactEvent == .noContact(millisecondsSinceLastHeard: 6_000))
+
+            // Liveness now reports the elapsed no-contact interval, and the session
+            // is still alive (a keystroke is accepted).
+            let staleLiveness = await fixture.session.liveness
+            #expect(staleLiveness.lastHeardFromServerMilliseconds == 0)
+            #expect(staleLiveness.millisecondsSinceLastHeard == 6_000)
+            try await fixture.session.sendKeystrokes([0x61])
+
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            hostOperationTask.cancel()
+            noContactEventTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
+    // Defect B at the session layer: an automatic link rebuild after a transport
+    // failure resumes the SAME session on a fresh link and surfaces `.reconnected`.
+    @Test
+    func linkFailureAutomaticallyReconnectsOnFreshLink() async throws {
+        let sessionKey = try MoshSessionKey(rawBytes: sessionKeyBytes)
+        let endpoint = MoshEndpoint(host: "localhost", port: 60_001, sessionKey: sessionKey)
+        let firstLink = IncomingFailureDatagramLink()
+        let secondLink = MoshInMemoryDatagramLink()
+        try await secondLink.start()
+        let factory = ReconnectingTransportFactory(links: [firstLink, secondLink])
+        let session = MoshSession(
+            configuration: MoshSessionConfiguration(
+                endpoint: endpoint,
+                initialTerminalDimensions: try MoshTerminalDimensions(columns: 80, rows: 24),
+                transportFactory: factory,
+                chaffSource: .none,
+                resilience: MoshSessionResilienceConfiguration(
+                    maximumLinkRebuildAttempts: 4,
+                    initialRebuildBackoffMilliseconds: 1,
+                    maximumRebuildBackoffMilliseconds: 2
+                )
+            )
+        )
+        let reconnectedEventTask = Task<Bool, Never> {
+            for await event in session.diagnosticEvents {
+                if event == .reconnected {
+                    return true
+                }
+                if event == .stopped {
+                    return false
+                }
+            }
+            return false
+        }
+
+        do {
+            try await session.start()
+            try await Task.sleep(for: .milliseconds(10))
+            await firstLink.failIncoming(throwing: MoshDatagramTransportError.notConnected)
+
+            let reconnected = try await withSessionTimeout {
+                await reconnectedEventTask.value
+            }
+            #expect(reconnected)
+            // The session is alive on the new link: a keystroke is accepted.
+            try await session.sendKeystrokes([0x61])
+
+            await session.stop()
+        } catch {
+            reconnectedEventTask.cancel()
+            await session.stop()
+            throw error
+        }
+    }
 }
 
 private struct MoshSessionFixture: Sendable {
@@ -1667,11 +1816,82 @@ private struct FailingAfterSendTransportFactory: MoshSessionTransportFactory {
     }
 }
 
-private struct IncomingFailureTransportFactory: MoshSessionTransportFactory {
-    let link: IncomingFailureDatagramLink
+/// Vends the given initial link once, then vends `StartFailingDatagramLink`s for
+/// every subsequent rebuild request, so a bounded rebuild loop is exercised and
+/// eventually exhausts.
+private actor SequencedRebuildTransportFactory: MoshSessionTransportFactory {
+    private let initialLink: IncomingFailureDatagramLink
+    private let rebuildError: MoshDatagramTransportError
+    private var hasVendedInitial = false
+    private var rebuildRequestCountStorage = 0
+
+    init(initialLink: IncomingFailureDatagramLink, rebuildError: MoshDatagramTransportError) {
+        self.initialLink = initialLink
+        self.rebuildError = rebuildError
+    }
 
     func makeDatagramLink(for endpoint: MoshEndpoint) async throws -> any MoshDatagramLink {
-        self.link
+        if self.hasVendedInitial == false {
+            self.hasVendedInitial = true
+            return self.initialLink
+        }
+        self.rebuildRequestCountStorage += 1
+        return StartFailingDatagramLink(startError: self.rebuildError)
+    }
+
+    func rebuildRequestCount() -> Int {
+        self.rebuildRequestCountStorage
+    }
+}
+
+/// Vends a fixed sequence of links: the first for `start()`, the rest for each
+/// subsequent rebuild request.
+private actor ReconnectingTransportFactory: MoshSessionTransportFactory {
+    private var links: [any MoshDatagramLink]
+
+    init(links: [any MoshDatagramLink]) {
+        self.links = links
+    }
+
+    func makeDatagramLink(for endpoint: MoshEndpoint) async throws -> any MoshDatagramLink {
+        guard self.links.isEmpty == false else {
+            throw MoshDatagramTransportError.notConnected
+        }
+        return self.links.removeFirst()
+    }
+}
+
+private actor StartFailingDatagramLink: MoshDatagramLink {
+    nonisolated let incomingDatagrams: MoshDatagramStream
+
+    private let incomingContinuation: MoshDatagramStream.Continuation
+    private let startError: MoshDatagramTransportError
+
+    init(startError: MoshDatagramTransportError) {
+        self.startError = startError
+        var capturedContinuation: MoshDatagramStream.Continuation?
+        self.incomingDatagrams = MoshDatagramStream(
+            bufferingPolicy: .bufferingNewest(1)
+        ) { continuation in
+            capturedContinuation = continuation
+        }
+
+        guard let capturedContinuation else {
+            preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+        self.incomingContinuation = capturedContinuation
+    }
+
+    func start() async throws {
+        throw self.startError
+    }
+
+    func send(_ datagram: [UInt8]) async throws {
+        _ = datagram
+    }
+
+    func stop() async {
+        self.incomingContinuation.finish()
     }
 }
 
@@ -1808,7 +2028,8 @@ private func makeSessionFixture(
         timeoutMilliseconds: 1_000,
         shutdownMaximumAttempts: 16
     ),
-    predictionConfiguration: MoshPredictionConfiguration = MoshPredictionConfiguration()
+    predictionConfiguration: MoshPredictionConfiguration = MoshPredictionConfiguration(),
+    resilience: MoshSessionResilienceConfiguration = MoshSessionResilienceConfiguration()
 ) async throws -> MoshSessionFixture {
     let pair = await MoshInMemoryDatagramLink.connectedPair()
     let clock = ManualMillisecondsClock()
@@ -1825,7 +2046,8 @@ private func makeSessionFixture(
             timer: timer,
             timing: timing,
             chaffSource: .none,
-            predictionConfiguration: predictionConfiguration
+            predictionConfiguration: predictionConfiguration,
+            resilience: resilience
         )
     )
     let serverRuntime = try makeServerRuntime(
