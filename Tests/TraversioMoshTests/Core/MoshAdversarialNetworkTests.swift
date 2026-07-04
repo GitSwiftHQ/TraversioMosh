@@ -188,17 +188,17 @@ struct MoshAdversarialNetworkTests {
     // so the security-sensitive round-trip estimator must NOT move (a replay must
     // not be able to steer the RTT/timestamp clock).
     //
-    // SECONDARY FINDING (reported, deliberately NOT worked around by weakening
-    // this assertion): the `isInSequenceOrder` gate in MoshSSPInMemoryLoop.receive
-    // suppresses `noteRemoteHeard`/timestamp/RTT for an out-of-order datagram, but
-    // `processAcknowledgement` (~263) and `noteReceivedState` (~280) still run
-    // unconditionally and each bump `lastHeardAtMilliseconds`. So a replayed
-    // datagram DOES advance the connection's last-heard liveness signal —
-    // contradicting the loop's own comment ("last-heard state may only advance for
-    // an in-sequence datagram") and official Mosh, whose `recv_one` never touches
-    // `last_heard` for out-of-order packets. Low severity (only the liveness /
-    // no-contact signal is affected; state, RTT and crypto are not), but a genuine
-    // invariant/behaviour mismatch handed back for review.
+    // The `isInSequenceOrder` gate in MoshSSPInMemoryLoop.receive suppresses
+    // `noteRemoteHeard`/timestamp/RTT for an out-of-order datagram. It now also
+    // gates the two ordering-sensitive side effects of the transport-level work:
+    // `processAcknowledgement` and `noteReceivedState` still advance the idempotent
+    // ack *number* for the returned out-of-order payload, but their `last_heard`
+    // liveness advance and delayed-data-ack arming only fire for an in-sequence
+    // datagram — matching official Mosh, whose `recv_one` returns an out-of-order
+    // packet before touching `last_heard`. So a replayed datagram does NOT advance
+    // the connection's last-heard signal; a replay cannot mask a real outage in the
+    // liveness / no-contact signal or keep the active-retry timer hot. This test
+    // asserts that invariant alongside the RTT/timestamp one.
     @Test
     func duplicateAndReplayAreDedupedAndDoNotMoveRoundTripEstimate() async throws {
         let pair = await MoshInMemoryDatagramLink.connectedPair()
@@ -243,6 +243,9 @@ struct MoshAdversarialNetworkTests {
             // The out-of-order round-trip estimator baseline, captured before replay.
             let smoothedBeforeReplay = await server.smoothedRoundTripMilliseconds()
             let variationBeforeReplay = await server.roundTripVariationMilliseconds()
+            // The last-heard liveness baseline. The in-order delivery at clock 120
+            // advanced it; the later replay must NOT move it.
+            let lastHeardBeforeReplay = try #require(await server.lastHeardAtMilliseconds())
 
             // Replay the identical datagram much later, bypassing the fault link so
             // it reaches the server at a strictly greater clock value.
@@ -257,6 +260,10 @@ struct MoshAdversarialNetworkTests {
             // untouched — a replay cannot steer the round-trip clock.
             #expect(await server.smoothedRoundTripMilliseconds() == smoothedBeforeReplay)
             #expect(await server.roundTripVariationMilliseconds() == variationBeforeReplay)
+            // The replay is out-of-order, so the last-heard liveness signal is also
+            // untouched — it stays at the in-order delivery's clock (120), never the
+            // replay's clock (5_000). A replay cannot mask a real server outage.
+            #expect(await server.lastHeardAtMilliseconds() == lastHeardBeforeReplay)
 
             await client.stop()
             await server.stop()

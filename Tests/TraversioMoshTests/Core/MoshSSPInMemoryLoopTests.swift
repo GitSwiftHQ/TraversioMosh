@@ -301,6 +301,62 @@ struct MoshSSPInMemoryLoopTests {
         #expect(heartbeatAcknowledgement.instruction.acknowledgementNumber == 1)
     }
 
+    // A replayed / out-of-order datagram must not advance the connection's
+    // `lastHeardAtMilliseconds` liveness signal nor re-arm the delayed
+    // data-acknowledgement. Both are ordering-sensitive side effects gated on
+    // `isInSequenceOrder`, mirroring official Mosh `Connection::recv_one`, which
+    // returns an out-of-order datagram before touching `last_heard`. An
+    // in-sequence, non-empty-diff datagram must still do both. Only the idempotent
+    // ack-number advance and state application run for the out-of-order copy.
+    @Test
+    func replayedDatagramDoesNotAdvanceLastHeardOrRearmDataAcknowledgement() throws {
+        var loop = makeReceivingLoop()
+        let dataInstruction = MoshTransportInstruction(
+            protocolVersion: 2,
+            oldNumber: 0,
+            newNumber: 1,
+            acknowledgementNumber: 0,
+            throwawayNumber: 0,
+            diff: [0x41],
+            chaff: []
+        )
+        let packet = try singleFragmentPacket(for: dataInstruction)
+
+        // Before first contact the liveness signal is nil.
+        #expect(loop.lastHeardAtMilliseconds == nil)
+
+        // In-sequence delivery at t=10 applies state 1, advances last-heard, and
+        // arms the delayed data-ack (next wakeup pulled forward to now + 100ms).
+        let accepted = try requireInstruction(
+            try loop.receive(packet, nowMilliseconds: 10, isInSequenceOrder: true)
+        )
+        #expect(accepted.receiveResult == .accepted(newNumber: 1))
+        #expect(loop.lastHeardAtMilliseconds == 10)
+        #expect(try loop.waitTime(nowMilliseconds: 10) == 100)
+
+        // Fire the delayed data-ack so the scheduler falls back to its idle 3000ms
+        // acknowledgement cadence (next acknowledgement now due at 110 + 3000 = 3110).
+        _ = try #require(try loop.tick(nowMilliseconds: 110))
+        #expect(loop.lastHeardAtMilliseconds == 10)
+
+        // Replay the identical datagram, classified out-of-order, at a later clock.
+        // It is deduped by state number; state is applied exactly once.
+        let replay = try requireInstruction(
+            try loop.receive(packet, nowMilliseconds: 200, isInSequenceOrder: false)
+        )
+        #expect(replay.receiveResult == .duplicate(newNumber: 1))
+        #expect(replay.latestState.state.bytes == [0x41])
+
+        // Last-heard is UNCHANGED by the replay: it must not be able to mask a real
+        // outage in the liveness / no-contact signal. (Pre-fix this became 200.)
+        #expect(loop.lastHeardAtMilliseconds == 10)
+
+        // The delayed data-ack is NOT re-armed: the next wakeup stays on the idle
+        // interval (3110 - 200 = 2910), not pulled forward to 200 + 100 by a
+        // spurious data-ack. (Pre-fix this became 100.)
+        #expect(try loop.waitTime(nowMilliseconds: 200) == 2_910)
+    }
+
     @Test
     func shutdownAcknowledgementPrunesSenderThroughMaximumState() throws {
         var client = MoshSSPInMemoryLoop(

@@ -238,9 +238,13 @@ public struct MoshSSPInMemoryLoop<
         // before touching `saved_timestamp`, the RTT estimator, or `last_heard`.
         // Skipping these is security-sensitive: a replayed datagram must not be
         // able to move the timestamp/RTT estimators. The transport-level work
-        // below (ack processing, state application) is idempotent by state number
-        // and still runs, exactly as official's `Transport::recv` does for the
-        // returned out-of-order payload.
+        // below (ack processing, state application) still runs for the returned
+        // out-of-order payload exactly as official's `Transport::recv` does, but
+        // its two ordering-sensitive side effects — advancing the `last_heard`
+        // liveness signal and arming the delayed data-acknowledgement — are gated
+        // on `isInSequenceOrder` too. Only the idempotent ack-*number* advance and
+        // state application run unconditionally; a replay must not be able to mask
+        // a real outage in the liveness signal or keep the active-retry timer hot.
         if isInSequenceOrder {
             if packet.timestamp != Self.packetTimestampNoReply {
                 self.pendingTimestampReply = PendingTimestampReply(
@@ -263,7 +267,8 @@ public struct MoshSSPInMemoryLoop<
         if let acknowledgementNumber = instruction.acknowledgementNumber {
             self.scheduler.processAcknowledgement(
                 through: acknowledgementNumber,
-                nowMilliseconds: nowMilliseconds
+                nowMilliseconds: nowMilliseconds,
+                isInSequenceOrder: isInSequenceOrder
             )
         }
 
@@ -280,7 +285,8 @@ public struct MoshSSPInMemoryLoop<
             self.scheduler.noteReceivedState(
                 number: self.receiver.acknowledgementNumber,
                 hadNonEmptyDiff: hadNonEmptyDiff,
-                nowMilliseconds: nowMilliseconds
+                nowMilliseconds: nowMilliseconds,
+                isInSequenceOrder: isInSequenceOrder
             )
         }
 

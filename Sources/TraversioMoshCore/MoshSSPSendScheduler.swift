@@ -289,18 +289,29 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     }
 
     /// Records that a numbered state was appended at the back of the receiver's
-    /// queue. Always updates the ack number and last-heard time (official Mosh's
-    /// `sender.set_ack_num` + `sender.remote_heard`). The delayed data-acknowledgement
-    /// is armed only when the received instruction carried a non-empty diff,
-    /// mirroring `set_data_ack()` being gated on `!inst.diff().empty()` in
-    /// `network/networktransport-impl.h`. Gating this prevents an endless
-    /// empty-ack ping-pong between two instances.
+    /// queue. The ack number is always updated (official Mosh's
+    /// `sender.set_ack_num`): it reflects the receiver's true latest state and is
+    /// idempotent, so a duplicate/out-of-order datagram re-asserting the current
+    /// latest number is harmless. The last-heard liveness advance and the delayed
+    /// data-acknowledgement arming, by contrast, are *ordering-sensitive* and only
+    /// run for an in-sequence datagram — mirroring official Mosh, whose
+    /// `Connection::recv_one` returns an out-of-order datagram before touching
+    /// `last_heard`, so a replay cannot mask a real outage in the liveness signal
+    /// or keep the active-retry branch hot. The data-acknowledgement is further
+    /// gated on the instruction carrying a non-empty diff, mirroring
+    /// `set_data_ack()` being gated on `!inst.diff().empty()` in
+    /// `network/networktransport-impl.h`, which prevents an endless empty-ack
+    /// ping-pong between two instances.
     public mutating func noteReceivedState(
         number: UInt64,
         hadNonEmptyDiff: Bool = true,
-        nowMilliseconds: UInt64
+        nowMilliseconds: UInt64,
+        isInSequenceOrder: Bool = true
     ) {
         self.sender.setAcknowledgementNumber(number)
+        guard isInSequenceOrder else {
+            return
+        }
         self.lastHeardAtMillisecondsStorage = nowMilliseconds
         if hadNonEmptyDiff {
             self.pendingDataAcknowledgement = true
@@ -319,9 +330,25 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         )
     }
 
-    public mutating func processAcknowledgement(through acknowledgementNumber: UInt64, nowMilliseconds: UInt64) {
+    /// Advances the sender's knowledge of what the peer has acknowledged. The
+    /// ack-number pruning (`sender.processAcknowledgement`) is monotonic and
+    /// idempotent — guarded by a `contains` check on the retained sent states — so
+    /// it runs regardless of datagram ordering; replaying it can only re-assert an
+    /// already-applied prune, never regress. The last-heard liveness advance is
+    /// ordering-sensitive and only runs for an in-sequence datagram, matching
+    /// official Mosh's `Connection::recv_one`, which returns an out-of-order
+    /// datagram before touching `last_heard`. Skipping it for a replay keeps the
+    /// liveness / no-contact signal honest and prevents a replay from keeping the
+    /// active-retry branch hot.
+    public mutating func processAcknowledgement(
+        through acknowledgementNumber: UInt64,
+        nowMilliseconds: UInt64,
+        isInSequenceOrder: Bool = true
+    ) {
         self.sender.processAcknowledgement(through: acknowledgementNumber)
-        self.lastHeardAtMillisecondsStorage = nowMilliseconds
+        if isInSequenceOrder {
+            self.lastHeardAtMillisecondsStorage = nowMilliseconds
+        }
     }
 
     public mutating func waitTime(nowMilliseconds: UInt64) throws -> UInt64? {
