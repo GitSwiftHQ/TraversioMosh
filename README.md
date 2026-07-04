@@ -33,12 +33,18 @@ retain their own `MoshNWDatagramLink` through a custom factory.
 `MoshSession` exposes raw keystroke sending, raw default terminal-input
 sending, explicit-mode terminal-input translation for callers that own that
 adapter boundary, resize sending, graceful shutdown, async host operation and
-render operation streams, diagnostic events including typed screen projection
-failures, protocol snapshots, and a renderer-ready screen snapshot.
+render operation streams, diagnostic events, protocol snapshots, a
+renderer-ready screen snapshot, and a liveness snapshot.
 
-The package is still under active compatibility work. See
-[`Docs/Readiness.md`](Docs/Readiness.md) for the current host-app handoff,
-validation status, lifecycle semantics, and remaining completion gates.
+The package is substantially hardened: hardened wire decoding (bounded inflate
+and resize dimensions), crypto session-lifetime enforcement with key wiping and
+redaction, a materialized-framebuffer state model, out-of-order and
+heartbeat-gated SSP receive, and automatic datagram-link rebuild that preserves
+the crypto session across transport death. See
+[`Docs/Readiness.md`](Docs/Readiness.md) for the host-app integration boundary,
+the resilience and liveness API, lifecycle semantics, and validation status.
+Some concerns remain host-application responsibilities; they are enumerated
+there.
 
 ## Products
 
@@ -100,10 +106,9 @@ await session.stop()
 
 ## Reference Policy
 
-`wiedymi/swift-mosh` is kept only as an external reference under the parent
-workspace's `References/Implementations/` directory. TraversioMosh code should
-not copy that implementation. Use official Mosh behavior, compatibility tests,
-and local audits as the source of truth.
+TraversioMosh does not copy any third-party Mosh implementation. Official Mosh
+behavior, protocol references, compatibility tests, and interoperability
+validation against real `mosh-server` are the source of truth.
 
 ## License
 
