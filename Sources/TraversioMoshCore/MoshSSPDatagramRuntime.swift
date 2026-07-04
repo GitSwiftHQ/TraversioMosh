@@ -140,6 +140,15 @@ public actor MoshSSPDatagramRuntime<
         self.loop.setCurrentState(state, nowMilliseconds: nowMilliseconds)
     }
 
+    public func modifyCurrentState(_ body: @Sendable (inout SendState) -> Void) async {
+        let nowMilliseconds = await self.clock.nowMilliseconds()
+        self.loop.modifyCurrentState(nowMilliseconds: nowMilliseconds, body)
+    }
+
+    public func currentSendState() -> SendState {
+        self.loop.currentSendState
+    }
+
     public func startShutdown() async {
         let nowMilliseconds = await self.clock.nowMilliseconds()
         self.loop.startShutdown(nowMilliseconds: nowMilliseconds)

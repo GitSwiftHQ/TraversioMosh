@@ -256,6 +256,21 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
 
     public mutating func setCurrentState(_ state: State, nowMilliseconds: UInt64) {
         self.sender.setCurrentState(state)
+        self.refreshPendingChange(nowMilliseconds: nowMilliseconds)
+    }
+
+    /// Appends a delta to the sender-owned current state. Preferred over
+    /// `setCurrentState` for growing streams, because `rationalizeStates` prunes
+    /// the sender's copy and a full re-injection would undo that pruning.
+    public mutating func modifyCurrentState(
+        nowMilliseconds: UInt64,
+        _ body: (inout State) -> Void
+    ) {
+        self.sender.modifyCurrentState(body)
+        self.refreshPendingChange(nowMilliseconds: nowMilliseconds)
+    }
+
+    private mutating func refreshPendingChange(nowMilliseconds: UInt64) {
         if self.sender.currentStateMatchesLastSentState {
             self.firstPendingChangeAtMilliseconds = nil
         } else if self.firstPendingChangeAtMilliseconds == nil {
@@ -342,6 +357,10 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
             nowMilliseconds: nowMilliseconds,
             timeoutMilliseconds: self.timeoutMilliseconds
         )
+
+        // Cut out the common prefix of all states, exactly where official Mosh's
+        // `calculate_timers` does (`network/transportsender-impl.h`).
+        self.sender.rationalizeStates()
 
         if self.pendingDataAcknowledgement {
             self.scheduleDelayedAcknowledgement(from: nowMilliseconds)

@@ -120,8 +120,19 @@ public struct MoshSSPInMemoryLoop<
         self.scheduler.shutdownAcknowledged
     }
 
+    public var currentSendState: SendState {
+        self.scheduler.sender.currentSendState
+    }
+
     public mutating func setCurrentState(_ state: SendState, nowMilliseconds: UInt64) {
         self.scheduler.setCurrentState(state, nowMilliseconds: nowMilliseconds)
+    }
+
+    public mutating func modifyCurrentState(
+        nowMilliseconds: UInt64,
+        _ body: (inout SendState) -> Void
+    ) {
+        self.scheduler.modifyCurrentState(nowMilliseconds: nowMilliseconds, body)
     }
 
     public mutating func startShutdown(nowMilliseconds: UInt64) {
@@ -196,7 +207,7 @@ public struct MoshSSPInMemoryLoop<
             )
         }
 
-        let receiveResult = try self.receiver.receive(instruction)
+        let receiveResult = try self.receiver.receive(instruction, nowMilliseconds: nowMilliseconds)
         if self.receiver.acknowledgementNumber == instruction.newNumber {
             self.scheduler.noteReceivedState(
                 number: self.receiver.acknowledgementNumber,

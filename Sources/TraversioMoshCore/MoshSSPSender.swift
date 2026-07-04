@@ -80,8 +80,31 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
         self.sentStates.map(\.number)
     }
 
+    public var currentSendState: State {
+        self.currentState
+    }
+
     public mutating func setCurrentState(_ state: State) {
         self.currentState = state
+    }
+
+    /// Applies an in-place edit to the current state. The sender owns the current
+    /// state so that `rationalizeStates` can prune it; callers append deltas here
+    /// instead of re-injecting a full, ever-growing state.
+    public mutating func modifyCurrentState(_ body: (inout State) -> Void) {
+        body(&self.currentState)
+    }
+
+    /// Mirrors `TransportSender::rationalize_states`: cut the common prefix that
+    /// the receiver is already known to hold out of the current state and every
+    /// retained sent state. For client keystrokes this drops acknowledged input;
+    /// for host framebuffers `subtract` is a no-op, so this is inert there.
+    public mutating func rationalizeStates() {
+        let knownReceiverState = self.sentStates[0].state
+        try? self.currentState.subtractMoshState(knownReceiverState)
+        for index in self.sentStates.indices {
+            try? self.sentStates[index].state.subtractMoshState(knownReceiverState)
+        }
     }
 
     public mutating func setAcknowledgementNumber(_ acknowledgementNumber: UInt64) {
@@ -286,5 +309,5 @@ public struct MoshSSPSender<State: MoshSynchronizedState>: Sendable {
 private struct MoshSentState<State: MoshSynchronizedState>: Equatable, Sendable {
     let number: UInt64
     var sentAtMilliseconds: UInt64
-    let state: State
+    var state: State
 }

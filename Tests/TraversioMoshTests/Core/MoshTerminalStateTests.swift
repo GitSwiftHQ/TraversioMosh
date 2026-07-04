@@ -89,7 +89,11 @@ struct MoshTerminalStateTests {
     }
 
     @Test
-    func hostStateDiffUpdatesSnapshotProjection() throws {
+    func hostStateDiffAdoptsFramebufferAndEmitsOnlyAppliedDiff() throws {
+        // Host states are now materialized framebuffers. A diff is applied onto
+        // the framebuffer (not appended to a log), so two states built by the
+        // same operation sequence are framebuffer-equal, and applying a diff
+        // reports exactly the operations that diff carried.
         let initial = MoshTerminalHostState(operations: [
             .write(MoshTerminalOutput(bytes: Array("hi".utf8))),
         ])
@@ -106,14 +110,28 @@ struct MoshTerminalStateTests {
         var engine = MoshTerminalStateEngine(hostState: initial)
         let emitted = try engine.applyHostDiff(diff)
 
+        // Framebuffer + echo-ack equality (Terminal::Complete::operator==).
         #expect(reconstructed == expected)
+        #expect(reconstructed.screenSnapshot == expected.screenSnapshot)
+
+        // Only the operations this diff carried are surfaced; no full-history log.
         #expect(emitted == [
             .resize(resized),
             .echoAcknowledgement(7),
         ])
-        #expect(engine.snapshot == expected.snapshot)
-        #expect(reconstructed.snapshot.dimensions == resized)
-        #expect(reconstructed.snapshot.latestEchoAcknowledgementNumber == 7)
+        #expect(reconstructed.lastAppliedOperations == [
+            .resize(resized),
+            .echoAcknowledgement(7),
+        ])
+
+        #expect(engine.snapshot.dimensions == resized)
+        #expect(engine.snapshot.latestEchoAcknowledgementNumber == 7)
+        #expect(engine.snapshot.operations == [
+            .resize(resized),
+            .echoAcknowledgement(7),
+        ])
+        #expect(reconstructed.dimensions == resized)
+        #expect(reconstructed.latestEchoAcknowledgementNumber == 7)
     }
 
     @Test

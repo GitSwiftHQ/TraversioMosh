@@ -139,6 +139,7 @@ public actor MoshSession {
     private var receiveTask: Task<Void, Never>?
     private var maintenanceTask: Task<Void, Never>?
     private var maintenanceGeneration: UInt64 = 0
+    private var lastAdoptedHostStateNumber: UInt64 = 0
     private var nextStopWaiterID: UInt64 = 0
     private var stopWaiters: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var cancelledStopWaiterIDs: Set<UInt64> = []
@@ -163,9 +164,11 @@ public actor MoshSession {
         self.diagnosticEvents = diagnosticEventStream.stream
         self.diagnosticEventContinuation = diagnosticEventStream.continuation
 
-        var terminalEngine = MoshTerminalStateEngine()
-        terminalEngine.enqueueClientOperation(.resize(configuration.initialTerminalDimensions))
-        self.terminalEngine = terminalEngine
+        self.terminalEngine = MoshTerminalStateEngine(
+            hostState: MoshTerminalHostState(
+                dimensions: configuration.initialTerminalDimensions
+            )
+        )
         self.terminalScreen = MoshTerminalScreen(
             dimensions: configuration.initialTerminalDimensions
         )
@@ -214,7 +217,9 @@ public actor MoshSession {
         let initialNowMilliseconds = await self.configuration.clock.nowMilliseconds()
         let loop = MoshSSPInMemoryLoop(
             initialSendState: MoshTerminalClientState(),
-            initialReceiveState: MoshTerminalHostState(),
+            initialReceiveState: MoshTerminalHostState(
+                dimensions: self.configuration.initialTerminalDimensions
+            ),
             initialNowMilliseconds: initialNowMilliseconds,
             timing: self.configuration.timing,
             maximumSerializedFragmentByteCount: self.configuration.maximumSerializedFragmentByteCount,
@@ -234,7 +239,10 @@ public actor MoshSession {
 
         do {
             try await runtime.start()
-            await runtime.setCurrentState(self.terminalEngine.clientState)
+            let initialDimensions = self.configuration.initialTerminalDimensions
+            await runtime.modifyCurrentState { state in
+                state.append(.resize(initialDimensions))
+            }
 
             self.runtime = runtime
             self.isStarted = true
@@ -345,8 +353,9 @@ public actor MoshSession {
         }
 
         self.cancelMaintenanceTask()
-        self.terminalEngine.enqueueClientOperation(operation)
-        await runtime.setCurrentState(self.terminalEngine.clientState)
+        await runtime.modifyCurrentState { state in
+            state.append(operation)
+        }
         do {
             _ = try await self.sendDueDatagrams()
         } catch is CancellationError {
@@ -387,33 +396,25 @@ public actor MoshSession {
         _ instruction: MoshSSPDatagramIncomingInstruction<MoshTerminalHostState>
     ) async throws {
         let state = instruction.instructionResult.latestState
-        let operations = self.terminalEngine.acceptHostState(state.state)
-        var generatedTerminalToHostBytes: [UInt8] = []
-        for (operationIndex, operation) in operations.enumerated() {
-            let renderOperation = MoshTerminalRenderOperation(operation)
-            if let renderOperation {
-                do {
-                    generatedTerminalToHostBytes.append(
-                        contentsOf: try self.terminalScreen.apply(renderOperation)
-                    )
-                } catch {
-                    let failure = MoshSessionScreenProjectionFailure(
-                        stateNumber: state.number,
-                        operationIndex: operationIndex,
-                        operation: renderOperation,
-                        reason: MoshSessionScreenProjectionFailureReason(error: error)
-                    )
-                    self.diagnosticEventContinuation.yield(.screenProjectionFailed(failure))
-                    throw failure
+        // Adopt the newest received framebuffer wholesale (mirrors stmclient.cc's
+        // `new_state = network->get_latest_remote_state().state.get_fb()`) instead
+        // of replaying operations. Only advance when a strictly newer state
+        // arrives, so a duplicate/heartbeat never re-yields host operations.
+        var operations: [MoshHostOperation] = []
+        if state.number > self.lastAdoptedHostStateNumber {
+            self.lastAdoptedHostStateNumber = state.number
+            operations = self.terminalEngine.acceptHostState(state.state)
+            self.terminalScreen = state.state.terminalScreen
+            for operation in operations {
+                self.hostOperationContinuation.yield(operation)
+                if let renderOperation = MoshTerminalRenderOperation(operation) {
+                    self.renderOperationContinuation.yield(renderOperation)
                 }
             }
-            self.hostOperationContinuation.yield(operation)
-            if let renderOperation {
-                self.renderOperationContinuation.yield(renderOperation)
+            let generatedTerminalToHostBytes = state.state.lastAppliedTerminalToHostBytes
+            if generatedTerminalToHostBytes.isEmpty == false {
+                try await self.updateClientState(.keystrokes(generatedTerminalToHostBytes))
             }
-        }
-        if generatedTerminalToHostBytes.isEmpty == false {
-            try await self.updateClientState(.keystrokes(generatedTerminalToHostBytes))
         }
         await self.updatePredictionHints(runtime: self.runtime, hostState: state.state)
         self.predictionEngine.cull(
