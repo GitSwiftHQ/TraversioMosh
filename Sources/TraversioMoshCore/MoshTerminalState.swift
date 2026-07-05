@@ -80,8 +80,10 @@ public struct MoshTerminalHostState: MoshSynchronizedState {
     public private(set) var lastAppliedOperations: [MoshHostOperation]
 
     /// Terminal-generated replies (DA/DSR) produced while applying the most
-    /// recent diff. Only these are echoed back to the server; historical replies
-    /// are never re-sent.
+    /// recent diff. Captured for observability only — the session never
+    /// transmits them: in official Mosh the server-side emulator answers such
+    /// queries and the client asserts it produced none
+    /// (`Complete::apply_string`, `statesync/completeterminal.cc`).
     public private(set) var lastAppliedTerminalToHostBytes: [UInt8]
 
     public init() {

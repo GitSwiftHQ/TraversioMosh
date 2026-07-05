@@ -188,34 +188,56 @@ struct MoshTerminalStateTests {
     }
 
     @Test
-    func dimensionsRejectValuesAboveMaximum() {
-        let tooWide = MoshTerminalDimensions.maximumDimension + 1
-        // Value at the cap is accepted; one above it is rejected (not clamped).
-        #expect(throws: Never.self) {
-            _ = try MoshTerminalDimensions(
-                columns: MoshTerminalDimensions.maximumDimension,
-                rows: MoshTerminalDimensions.maximumDimension
-            )
-        }
-        #expect(throws: MoshTerminalOperationError.invalidColumnCount(tooWide)) {
-            _ = try MoshTerminalDimensions(columns: tooWide, rows: 24)
-        }
-        #expect(throws: MoshTerminalOperationError.invalidRowCount(tooWide)) {
-            _ = try MoshTerminalDimensions(columns: 80, rows: tooWide)
-        }
+    func dimensionsClampValuesAboveMaximum() throws {
+        // Values within the cap pass through unchanged; oversized values clamp
+        // to the cap instead of throwing, because a wire resize that throws
+        // tears down the whole session.
+        let within = try MoshTerminalDimensions(columns: 1500, rows: 400)
+        #expect(within.columns == 1500)
+        #expect(within.rows == 400)
+
+        let atCap = try MoshTerminalDimensions(
+            columns: MoshTerminalDimensions.maximumDimension,
+            rows: MoshTerminalDimensions.maximumDimension
+        )
+        #expect(atCap.columns == MoshTerminalDimensions.maximumDimension)
+        #expect(atCap.rows == MoshTerminalDimensions.maximumDimension)
+
+        let oversized = try MoshTerminalDimensions(columns: 5000, rows: 5000)
+        #expect(oversized.columns == MoshTerminalDimensions.maximumDimension)
+        #expect(oversized.rows == MoshTerminalDimensions.maximumDimension)
     }
 
     @Test
-    func operationDecodingRejectsOversizedWireResizeDimensions() {
-        // A malicious server resize of 2^31-1 must be rejected before any
-        // grid allocation, not accepted as an unbounded dimension.
+    func operationDecodingClampsOversizedWireResizeDimensions() throws {
+        // A hostile or buggy peer resize of 2^31-1 must not throw (a throw
+        // here is classified non-packet-local and tears down the session) and
+        // must not reach grid allocation unclamped.
         let hostMessage = MoshHostMessage(instructions: [
-            MoshHostInstruction(resize: MoshTerminalSize(columns: Int32.max, rows: 24)),
+            MoshHostInstruction(resize: MoshTerminalSize(columns: Int32.max, rows: 5000)),
         ])
 
-        #expect(throws: MoshTerminalOperationError.invalidColumnCount(Int32.max)) {
-            _ = try MoshHostOperation.operations(from: hostMessage)
-        }
+        let operations = try MoshHostOperation.operations(from: hostMessage)
+
+        #expect(operations == [
+            .resize(try MoshTerminalDimensions(
+                columns: MoshTerminalDimensions.maximumDimension,
+                rows: MoshTerminalDimensions.maximumDimension
+            )),
+        ])
+    }
+
+    @Test
+    func operationDecodingAcceptsLargeButRealisticWireResize() throws {
+        // Regression: a 1500x400 resize used to work, then a 1000-cap rejected
+        // it and killed the session. It must decode to exactly 1500x400.
+        let hostMessage = MoshHostMessage(instructions: [
+            MoshHostInstruction(resize: MoshTerminalSize(columns: 1500, rows: 400)),
+        ])
+
+        let operations = try MoshHostOperation.operations(from: hostMessage)
+
+        #expect(operations == [.resize(try MoshTerminalDimensions(columns: 1500, rows: 400))])
     }
 
     @Test

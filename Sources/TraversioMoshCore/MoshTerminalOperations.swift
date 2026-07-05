@@ -15,26 +15,31 @@ public struct MoshTerminalDimensions: Equatable, Sendable {
     ///
     /// A resize instruction is peer-controlled, and `MoshTerminalScreen`
     /// allocates a cell grid of `columns * rows`. Without a ceiling a malicious
-    /// `resize` (e.g. `Int32.max` columns) forces an OOM-scale allocation. 1000
-    /// comfortably exceeds any real display (well past 8K-wide multi-monitor
-    /// layouts) while bounding the grid to at most 1_000_000 cells, so it is a
-    /// safe interop cap. Values above the bound are rejected, not clamped, so a
-    /// caller never silently renders at the wrong size.
-    public static let maximumDimension: Int32 = 1000
+    /// `resize` (e.g. `Int32.max` columns) forces an OOM-scale allocation. 2048
+    /// matches official mosh's effective per-dimension bound (its
+    /// terminal-to-host transport buffer is sized 2048 * 2048;
+    /// `Framebuffer::resize` itself has no per-dimension cap) and bounds the
+    /// grid to at most 4_194_304 cells. Oversized values are clamped, not
+    /// rejected: a resize arrives over the wire mid-session, and throwing there
+    /// tears down an otherwise healthy connection that official mosh would
+    /// keep serving.
+    public static let maximumDimension: Int32 = 2048
 
     public let columns: Int32
     public let rows: Int32
 
     public init(columns: Int32, rows: Int32) throws {
-        guard columns > 0, columns <= Self.maximumDimension else {
+        // Nonpositive dimensions stay rejected (official mosh asserts
+        // `s_width > 0 && s_height > 0`); only the upper bound clamps.
+        guard columns > 0 else {
             throw MoshTerminalOperationError.invalidColumnCount(columns)
         }
-        guard rows > 0, rows <= Self.maximumDimension else {
+        guard rows > 0 else {
             throw MoshTerminalOperationError.invalidRowCount(rows)
         }
 
-        self.columns = columns
-        self.rows = rows
+        self.columns = min(columns, Self.maximumDimension)
+        self.rows = min(rows, Self.maximumDimension)
     }
 
     public init(wireSize: MoshTerminalSize) throws {
@@ -133,6 +138,25 @@ public enum MoshHostOperation: Equatable, Sendable {
 public enum MoshTerminalRenderOperation: Equatable, Sendable {
     case write(MoshTerminalOutput)
     case resize(MoshTerminalDimensions)
+    /// The consumer's incremental picture is no longer valid and must be replaced
+    /// wholesale with this screen snapshot. Emitted when the server re-bases a
+    /// diff (its `oldNumber` is not the state the stream last rendered — possible
+    /// whenever an acknowledgement is lost), because that diff's operations are
+    /// relative to a frame the consumer never saw and cannot be applied
+    /// incrementally. Official Mosh has no incremental stream at all: its client
+    /// recomputes every frame from the latest framebuffer
+    /// (`frontend/stmclient.cc` `display.new_frame`), which this resync mirrors.
+    ///
+    /// Limitation: the snapshot carries only the visible frame (rows, cursor, and
+    /// display modes). Emulator-internal interpretation state — scroll region,
+    /// tab stops, pending wrap, current pen attributes, parser state — is NOT
+    /// carried and resets to a fresh screen's defaults in
+    /// `MoshTerminalScreen.apply(.resync)`. An incremental `apply()` consumer may
+    /// therefore render subsequent chained writes with reset interpretation state
+    /// until the application re-asserts it. Consumers needing an always-exact
+    /// picture should read `MoshSession.screenSnapshot` instead of reconstructing
+    /// from this stream.
+    case resync(MoshTerminalScreenSnapshot)
 
     public init?(_ hostOperation: MoshHostOperation) {
         switch hostOperation {

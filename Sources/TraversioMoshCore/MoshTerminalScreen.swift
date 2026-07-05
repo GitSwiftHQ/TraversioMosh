@@ -359,7 +359,39 @@ public struct MoshTerminalScreen: Sendable {
         case .resize(let dimensions):
             self.resize(dimensions)
             return self.drainTerminalToHostBytes()
+        case .resync(let snapshot):
+            self.restore(from: snapshot)
+            return []
         }
+    }
+
+    /// Replace the visible screen wholesale with a resync snapshot. Emulator
+    /// interpretation state the snapshot does not carry (scroll region, tab
+    /// stops, pending wrap, current pen attributes, parser state) resets to a
+    /// fresh screen's defaults, so an incremental consumer's subsequent chained
+    /// writes may render with reset interpretation state until the application
+    /// re-asserts it; the authoritative emulator state lives in the synchronized
+    /// host state on the receive path, and `MoshSession.screenSnapshot` is the
+    /// always-exact surface.
+    private mutating func restore(from snapshot: MoshTerminalScreenSnapshot) {
+        var restored = MoshTerminalScreen(dimensions: snapshot.dimensions)
+        restored.rows = snapshot.rows
+        restored.cursor = snapshot.cursor
+        restored.isCursorVisible = snapshot.isCursorVisible
+        restored.reverseVideo = snapshot.isReverseVideoEnabled
+        restored.bracketedPaste = snapshot.isBracketedPasteEnabled
+        restored.mouseReportingMode = snapshot.mouseReportingMode
+        restored.mouseFocusEvent = snapshot.isMouseFocusEventEnabled
+        restored.mouseAlternateScroll = snapshot.isMouseAlternateScrollEnabled
+        restored.mouseEncodingMode = snapshot.mouseEncodingMode
+        restored.applicationCursorKeys = snapshot.isApplicationCursorKeysEnabled
+        restored.bellCount = snapshot.bellCount
+        restored.titleInitialized = snapshot.titleInitialized
+        restored.iconName = snapshot.iconName
+        restored.windowTitle = snapshot.windowTitle
+        restored.clipboard = snapshot.clipboard
+        restored.currentHyperlink = snapshot.currentHyperlink
+        self = restored
     }
 
     @discardableResult

@@ -17,6 +17,32 @@ struct MoshTerminalScreenTests {
         #expect(screen.snapshot.cursor == MoshTerminalCursor(row: 1, column: 2))
     }
 
+    // Behavior E: `.resync` replaces the visible screen wholesale from a snapshot,
+    // restoring rows, cursor, and carried modes (e.g. application cursor keys), and
+    // generates no terminal-to-host bytes. The receive path uses this when the server
+    // re-bases a diff so the display replica is made exact without incremental replay.
+    @Test
+    func resyncRestoresRowsCursorAndModesFromSnapshot() throws {
+        // A source screen with distinctive content, cursor, and an enabled mode.
+        var source = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 4, rows: 2))
+        try source.apply(MoshTerminalOutput(bytes: Array("AB\u{1b}[?1hC".utf8)))
+        let snapshot = source.snapshot
+        #expect(snapshot.isApplicationCursorKeysEnabled == true)
+
+        // A differently-sized screen with unrelated content is resynced wholesale.
+        var target = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 2, rows: 3))
+        try target.apply(MoshTerminalOutput(bytes: Array("zz".utf8)))
+
+        let terminalToHostBytes = try target.apply(.resync(snapshot))
+
+        #expect(terminalToHostBytes == [])
+        #expect(target.snapshot == snapshot)
+        #expect(target.snapshot.dimensions == snapshot.dimensions)
+        #expect(target.snapshot.rows == snapshot.rows)
+        #expect(target.snapshot.cursor == snapshot.cursor)
+        #expect(target.snapshot.isApplicationCursorKeysEnabled == true)
+    }
+
     @Test
     func autoWrapModeWrapsOnNextPrintableAfterRightMargin() throws {
         var screen = try MoshTerminalScreen(dimensions: MoshTerminalDimensions(columns: 3, rows: 2))
