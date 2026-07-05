@@ -108,6 +108,50 @@ struct MoshProtobufTests {
     }
 
     @Test
+    func rejectsGroupNestingBeyondRecursionLimit() {
+        // 200 consecutive start-group tags (field 100). Group skipping recurses
+        // per nesting level, so without a depth cap this small input overflows
+        // the stack and crashes the process. It must throw instead.
+        let startGroups = Array(repeating: hex("A306"), count: 200).flatMap { $0 }
+
+        #expect(throws: MoshProtobufError.recursionLimitExceeded) {
+            _ = try MoshTransportInstruction(serializedBytes: startGroups)
+        }
+    }
+
+    @Test
+    func skipsGroupNestingAtRecursionLimit() throws {
+        // Exactly 100 nested groups (the cap) with matching end-groups, then
+        // the known field 3 (newNumber = 7). Nesting at the limit must still
+        // decode; one level deeper must throw, not crash.
+        let depth = 100
+        let nested = Array(repeating: hex("A306"), count: depth).flatMap { $0 }
+            + Array(repeating: hex("A406"), count: depth).flatMap { $0 }
+            + hex("1807")
+        let instruction = try MoshTransportInstruction(serializedBytes: nested)
+
+        #expect(instruction.newNumber == 7)
+
+        let tooDeep = Array(repeating: hex("A306"), count: depth + 1).flatMap { $0 }
+            + Array(repeating: hex("A406"), count: depth + 1).flatMap { $0 }
+        #expect(throws: MoshProtobufError.recursionLimitExceeded) {
+            _ = try MoshTransportInstruction(serializedBytes: tooDeep)
+        }
+    }
+
+    @Test
+    func skipsModeratelyNestedGroups() throws {
+        // 10 nested groups is well under the recursion cap and must skip
+        // cleanly through to the trailing known field.
+        let nested = Array(repeating: hex("A306"), count: 10).flatMap { $0 }
+            + Array(repeating: hex("A406"), count: 10).flatMap { $0 }
+            + hex("1807")
+        let instruction = try MoshTransportInstruction(serializedBytes: nested)
+
+        #expect(instruction.newNumber == 7)
+    }
+
+    @Test
     func rejectsLengthVarintExceedingIntMax() {
         // Field 6 (diff, wire type 2) with a length varint of 2^63 (Int.max + 1).
         // A trapping Int(UInt64) narrowing would crash the process here; the

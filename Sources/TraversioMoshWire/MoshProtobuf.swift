@@ -10,6 +10,7 @@ public enum MoshProtobufError: Error, Equatable, Sendable {
     case varintOutOfRange(fieldNumber: Int, value: UInt64)
     case unsupportedWireType(Int)
     case unexpectedWireType(fieldNumber: Int, expected: Int, actual: Int)
+    case recursionLimitExceeded
 }
 
 public struct MoshTerminalSize: Equatable, Sendable {
@@ -484,7 +485,16 @@ private struct ProtobufReader {
         return Array(self.bytes[self.offset..<(self.offset + count)])
     }
 
+    /// Group skipping recurses per nesting level, so the depth must be capped
+    /// or a short run of start-group tags overflows the stack. 100 matches the
+    /// C++ protobuf default recursion limit.
+    private static let maximumGroupDepth = 100
+
     mutating func skip(field: ProtobufField) throws {
+        try self.skip(field: field, groupDepth: 0)
+    }
+
+    private mutating func skip(field: ProtobufField, groupDepth: Int) throws {
         switch field.wireType {
         case 0:
             _ = try self.readVarint()
@@ -494,7 +504,10 @@ private struct ProtobufReader {
             _ = try self.readLengthDelimited()
         case 3:
             // Start-group: recursively skip fields up to the matching end-group.
-            try self.skipGroup(fieldNumber: field.number)
+            guard groupDepth < Self.maximumGroupDepth else {
+                throw MoshProtobufError.recursionLimitExceeded
+            }
+            try self.skipGroup(fieldNumber: field.number, groupDepth: groupDepth + 1)
         case 5:
             try self.skipBytes(4)
         default:
@@ -504,7 +517,7 @@ private struct ProtobufReader {
         }
     }
 
-    private mutating func skipGroup(fieldNumber: Int) throws {
+    private mutating func skipGroup(fieldNumber: Int, groupDepth: Int) throws {
         while let field = try self.nextField() {
             if field.wireType == 4 {
                 guard field.number == fieldNumber else {
@@ -513,7 +526,7 @@ private struct ProtobufReader {
                 }
                 return
             }
-            try self.skip(field: field)
+            try self.skip(field: field, groupDepth: groupDepth)
         }
         // Ran out of bytes before the matching end-group.
         throw MoshProtobufError.truncated
