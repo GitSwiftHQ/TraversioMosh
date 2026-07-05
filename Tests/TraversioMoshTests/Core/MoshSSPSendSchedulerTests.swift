@@ -144,7 +144,10 @@ struct MoshSSPSendSchedulerTests {
 
         scheduler.setCurrentState(ByteState([1]), nowMilliseconds: 0)
         _ = try scheduler.tick(nowMilliseconds: 20)
-        scheduler.noteRemoteHeard(nowMilliseconds: 21)
+        // A new peer state appended at the back (an empty-diff heartbeat) is what
+        // keeps the active-retry window hot: official `remote_heard` fires only on
+        // a new-state append (`Transport::recv` push_back path).
+        scheduler.noteReceivedState(number: 1, hadNonEmptyDiff: false, nowMilliseconds: 21)
 
         #expect(try scheduler.waitTime(nowMilliseconds: 169) == 1)
         #expect(try scheduler.tick(nowMilliseconds: 169) == nil)
@@ -154,6 +157,33 @@ struct MoshSSPSendSchedulerTests {
         #expect(retransmission.oldNumber == 0)
         #expect(retransmission.newNumber == 1)
         #expect(retransmission.diff == [1])
+    }
+
+    // Official Mosh gates ACTIVE retransmission on `TransportSender::last_heard`
+    // ("last time received new state", advanced only by `remote_heard` on a
+    // new-state append) — never on the connection-level `Connection::last_heard`
+    // that advances for every in-sequence datagram. Connection-level contact
+    // alone therefore must not keep the active-retry window hot, while it does
+    // advance the informational liveness property.
+    @Test
+    func connectionLevelContactAloneDoesNotKeepActiveRetryHot() throws {
+        var scheduler = MoshSSPSendScheduler(
+            initialState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(
+                sendIntervalMilliseconds: 20,
+                timeoutMilliseconds: 50
+            ),
+            chaffSource: .none
+        )
+
+        scheduler.setCurrentState(ByteState([1]), nowMilliseconds: 0)
+        _ = try scheduler.tick(nowMilliseconds: 20)
+        scheduler.noteRemoteHeard(nowMilliseconds: 21)
+
+        #expect(scheduler.lastHeardAtMilliseconds == 21)
+        // No new peer state was ever appended, so the retransmit that a
+        // transport-sender-level advance would make due at 170 stays off.
+        #expect(try scheduler.tick(nowMilliseconds: 170) == nil)
     }
 
     @Test
@@ -170,7 +200,7 @@ struct MoshSSPSendSchedulerTests {
 
         scheduler.setCurrentState(ByteState([1]), nowMilliseconds: 0)
         _ = try scheduler.tick(nowMilliseconds: 20)
-        scheduler.noteRemoteHeard(nowMilliseconds: 21)
+        scheduler.noteReceivedState(number: 1, hadNonEmptyDiff: false, nowMilliseconds: 21)
 
         #expect(try scheduler.tick(nowMilliseconds: 200) == nil)
     }
@@ -203,7 +233,7 @@ struct MoshSSPSendSchedulerTests {
 
         scheduler.setCurrentState(ByteState([1]), nowMilliseconds: 0)
         _ = try requireData(try scheduler.tick(nowMilliseconds: 20))
-        scheduler.noteRemoteHeard(nowMilliseconds: 21)
+        scheduler.noteReceivedState(number: 1, hadNonEmptyDiff: false, nowMilliseconds: 21)
 
         // The retransmit of the unacknowledged state 1 becomes due at
         // lastSentAt(20) + timeout(50) + ackDelay(100) = 170, so `waitTime` reports 0.

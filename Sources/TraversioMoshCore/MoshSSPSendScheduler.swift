@@ -170,7 +170,8 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     private var nextAcknowledgementAtMilliseconds: UInt64
     private var nextSendAtMilliseconds: UInt64?
     private var firstPendingChangeAtMilliseconds: UInt64?
-    private var lastHeardAtMillisecondsStorage: UInt64?
+    private var connectionLastHeardAtMillisecondsStorage: UInt64?
+    private var senderLastHeardAtMillisecondsStorage: UInt64?
     private var pendingDataAcknowledgement: Bool
     private var shutdownStartedAtMilliseconds: UInt64?
     private var shutdownAttemptCountStorage: Int
@@ -194,7 +195,8 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         )
         self.nextSendAtMilliseconds = nil
         self.firstPendingChangeAtMilliseconds = nil
-        self.lastHeardAtMillisecondsStorage = nil
+        self.connectionLastHeardAtMillisecondsStorage = nil
+        self.senderLastHeardAtMillisecondsStorage = nil
         self.pendingDataAcknowledgement = false
         self.shutdownStartedAtMilliseconds = nil
         self.shutdownAttemptCountStorage = 0
@@ -212,14 +214,30 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         self.shutdownAttemptCountStorage
     }
 
-    /// Clock time (ms) at which the peer was last heard from: the timestamp of the
-    /// most recent in-sequence datagram or acknowledgement. `nil` until first
-    /// contact. Mirrors official Mosh `Connection::last_heard`
-    /// (`network/network.cc`), surfaced for host-visible liveness rendering
-    /// ("last contact Ns ago", `frontend/terminaloverlay.cc` ~205-217). Purely
-    /// informational: it never drives teardown.
+    /// Clock time (ms) of the most recent **in-sequence datagram** from the peer.
+    /// `nil` until first contact.
+    ///
+    /// Official Mosh keeps two distinct last-heard signals, and this scheduler
+    /// mirrors both:
+    ///
+    /// - **Connection-level** (`Connection::last_heard`, `network/network.cc`
+    ///   `recv_one`): advances for every authenticated in-order datagram
+    ///   regardless of instruction content; an out-of-order/replayed datagram
+    ///   never moves it. That is this property, fed by `noteRemoteHeard` (and,
+    ///   for standalone-scheduler callers, `processAcknowledgement`'s
+    ///   in-sequence path). It is surfaced for host-visible liveness rendering
+    ///   ("last contact Ns ago", `frontend/terminaloverlay.cc` ~205-217) and
+    ///   does not gate retransmission.
+    /// - **Transport-sender-level** (`TransportSender::last_heard`, "last time
+    ///   received new state", `network/transportsender.h`): advances only when
+    ///   a genuinely new state is appended at the back of the receiver queue
+    ///   (`noteReceivedState`, mirroring `sender.remote_heard()` in
+    ///   `Transport::recv`), independent of datagram sequence order. It feeds
+    ///   `hasHeardRemoteRecently`, which gates the ACTIVE_RETRY_TIMEOUT
+    ///   retransmission window in `recalculateTimers` — so it does drive send
+    ///   behavior, not teardown.
     public var lastHeardAtMilliseconds: UInt64? {
-        self.lastHeardAtMillisecondsStorage
+        self.connectionLastHeardAtMillisecondsStorage
     }
 
     public var sendIntervalMilliseconds: UInt64 {
@@ -288,39 +306,50 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         }
     }
 
-    /// Records that a numbered state was appended at the back of the receiver's
-    /// queue. The ack number is always updated (official Mosh's
-    /// `sender.set_ack_num`): it reflects the receiver's true latest state and is
-    /// idempotent, so a duplicate/out-of-order datagram re-asserting the current
-    /// latest number is harmless. The last-heard liveness advance and the delayed
-    /// data-acknowledgement arming, by contrast, are *ordering-sensitive* and only
-    /// run for an in-sequence datagram — mirroring official Mosh, whose
-    /// `Connection::recv_one` returns an out-of-order datagram before touching
-    /// `last_heard`, so a replay cannot mask a real outage in the liveness signal
-    /// or keep the active-retry branch hot. The data-acknowledgement is further
-    /// gated on the instruction carrying a non-empty diff, mirroring
-    /// `set_data_ack()` being gated on `!inst.diff().empty()` in
-    /// `network/networktransport-impl.h`, which prevents an endless empty-ack
-    /// ping-pong between two instances.
+    /// Records that a numbered state was appended at the **back** of the
+    /// receiver's queue. Callers must invoke this only for a genuinely new
+    /// latest state — never for a duplicate, an out-of-order state number
+    /// inserted mid-queue, or a dropped (queue-full) state. This mirrors the
+    /// tail of official Mosh `Transport::recv`
+    /// (`network/networktransport-impl.h` ~167-173): only after
+    /// `received_states.push_back` does it run `sender.set_ack_num`,
+    /// `sender.remote_heard`, and — gated on `!inst.diff().empty()` —
+    /// `set_data_ack()`; the duplicate and insert-in-middle paths return before
+    /// reaching any of them.
+    ///
+    /// Datagram sequence order is deliberately NOT a gate here: official's
+    /// transport layer never sees it (`Connection::recv_one` returns
+    /// out-of-order payloads for full transport processing), so a
+    /// multi-fragment instruction completed by an out-of-order datagram still
+    /// advances the transport-sender last-heard signal and arms the delayed
+    /// data-acknowledgement. A true replay appends nothing, so it never reaches
+    /// this method and can neither arm the acknowledgement nor keep the
+    /// active-retry window hot. The non-empty-diff gate on the
+    /// data-acknowledgement prevents an endless empty-ack ping-pong between two
+    /// instances.
     public mutating func noteReceivedState(
         number: UInt64,
         hadNonEmptyDiff: Bool = true,
-        nowMilliseconds: UInt64,
-        isInSequenceOrder: Bool = true
+        nowMilliseconds: UInt64
     ) {
         self.sender.setAcknowledgementNumber(number)
-        guard isInSequenceOrder else {
-            return
-        }
-        self.lastHeardAtMillisecondsStorage = nowMilliseconds
+        self.senderLastHeardAtMillisecondsStorage = nowMilliseconds
         if hadNonEmptyDiff {
             self.pendingDataAcknowledgement = true
             self.scheduleDelayedAcknowledgement(from: nowMilliseconds)
         }
     }
 
+    /// Records connection-level contact: an authenticated **in-sequence**
+    /// datagram arrived. Mirrors `Connection::recv_one` advancing
+    /// `Connection::last_heard` (`network/network.cc` ~524). Callers must not
+    /// invoke this for an out-of-order/replayed datagram (`recv_one` returns
+    /// such a payload before touching `last_heard`), so a replay cannot mask a
+    /// real outage in the liveness signal. This does not feed the active-retry
+    /// gate, which follows the transport-sender-level new-state-appended rule
+    /// (`noteReceivedState`).
     public mutating func noteRemoteHeard(nowMilliseconds: UInt64) {
-        self.lastHeardAtMillisecondsStorage = nowMilliseconds
+        self.connectionLastHeardAtMillisecondsStorage = nowMilliseconds
     }
 
     public mutating func processPacketTimestampReply(_ timestampReply: UInt16, nowMilliseconds: UInt64) {
@@ -333,13 +362,17 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     /// Advances the sender's knowledge of what the peer has acknowledged. The
     /// ack-number pruning (`sender.processAcknowledgement`) is monotonic and
     /// idempotent — guarded by a `contains` check on the retained sent states — so
-    /// it runs regardless of datagram ordering; replaying it can only re-assert an
-    /// already-applied prune, never regress. The last-heard liveness advance is
-    /// ordering-sensitive and only runs for an in-sequence datagram, matching
-    /// official Mosh's `Connection::recv_one`, which returns an out-of-order
-    /// datagram before touching `last_heard`. Skipping it for a replay keeps the
-    /// liveness / no-contact signal honest and prevents a replay from keeping the
-    /// active-retry branch hot.
+    /// it runs regardless of datagram ordering, exactly as official Mosh's
+    /// `Transport::recv` runs `process_acknowledgment_through` for every
+    /// assembled instruction, including one completed by an out-of-order
+    /// datagram. Ack processing never advances the transport-sender-level
+    /// last-heard signal that gates active retransmission (official's
+    /// `process_acknowledgment_through` does not touch
+    /// `TransportSender::last_heard`; only a new state appended at the back
+    /// does, via `remote_heard`). For an in-sequence datagram this records
+    /// connection-level contact — redundant behind `MoshSSPInMemoryLoop`, which
+    /// already called `noteRemoteHeard`, but meaningful for
+    /// standalone-scheduler callers that have no separate datagram hook.
     public mutating func processAcknowledgement(
         through acknowledgementNumber: UInt64,
         nowMilliseconds: UInt64,
@@ -347,7 +380,7 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
     ) {
         self.sender.processAcknowledgement(through: acknowledgementNumber)
         if isInSequenceOrder {
-            self.lastHeardAtMillisecondsStorage = nowMilliseconds
+            self.connectionLastHeardAtMillisecondsStorage = nowMilliseconds
         }
     }
 
@@ -495,12 +528,17 @@ public struct MoshSSPSendScheduler<State: MoshSynchronizedState>: Sendable {
         }
     }
 
+    /// The ACTIVE_RETRY_TIMEOUT gate on retransmission, following official
+    /// `calculate_timers`'s `last_heard + ACTIVE_RETRY_TIMEOUT > now` — where
+    /// `last_heard` is the transport-sender-level "last time received new
+    /// state" signal, advanced only by `noteReceivedState`. Connection-level
+    /// datagram contact alone does not keep this window hot.
     private func hasHeardRemoteRecently(_ nowMilliseconds: UInt64) -> Bool {
-        guard let lastHeardAtMilliseconds = self.lastHeardAtMillisecondsStorage else {
+        guard let senderLastHeardAtMilliseconds = self.senderLastHeardAtMillisecondsStorage else {
             return false
         }
         return Self.saturatingAdd(
-            lastHeardAtMilliseconds,
+            senderLastHeardAtMilliseconds,
             self.timing.activeRetryTimeoutMilliseconds
         ) > nowMilliseconds
     }

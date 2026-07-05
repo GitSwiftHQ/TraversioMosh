@@ -62,7 +62,16 @@ struct MoshSSPInMemoryLoopTests {
         loop.setCurrentState(ByteState([1]), nowMilliseconds: 0)
         _ = try #require(try loop.tick(nowMilliseconds: 250))
 
-        try receiveTimestampReply(140, into: &loop, nowMilliseconds: 260)
+        // The peer is heard via a genuinely-new empty-diff heartbeat carrying the
+        // timestamp reply. The SRTT sample (260 - 140 = 120 ms) sets the send
+        // interval and, through it, the retransmit timeout; the state append (not
+        // the datagram itself) is what advances the transport-sender last-heard
+        // signal that keeps the ACTIVE_RETRY window hot — a re-based / unappliable
+        // datagram (`.missingReference`) would not, per official `Transport::recv`,
+        // which only calls `remote_heard()` after `received_states.push_back`. The
+        // empty diff avoids arming a competing delayed data-acknowledgement, so the
+        // retransmit timeline is driven purely by the SRTT-derived timeout.
+        try receiveHeardTimestampReply(140, newNumber: 1, into: &loop, nowMilliseconds: 260)
 
         #expect(try loop.waitTime(nowMilliseconds: 709) == 1)
         #expect(try loop.tick(nowMilliseconds: 709) == nil)
@@ -301,13 +310,17 @@ struct MoshSSPInMemoryLoopTests {
         #expect(heartbeatAcknowledgement.instruction.acknowledgementNumber == 1)
     }
 
-    // A replayed / out-of-order datagram must not advance the connection's
-    // `lastHeardAtMilliseconds` liveness signal nor re-arm the delayed
-    // data-acknowledgement. Both are ordering-sensitive side effects gated on
-    // `isInSequenceOrder`, mirroring official Mosh `Connection::recv_one`, which
-    // returns an out-of-order datagram before touching `last_heard`. An
-    // in-sequence, non-empty-diff datagram must still do both. Only the idempotent
-    // ack-number advance and state application run for the out-of-order copy.
+    // A replayed datagram appends nothing to the receiver queue, so it must not
+    // advance EITHER last-heard signal nor re-arm the delayed
+    // data-acknowledgement. The connection-level signal
+    // (`lastHeardAtMilliseconds`) is gated on `isInSequenceOrder`, mirroring
+    // official `Connection::recv_one`, which returns an out-of-order datagram
+    // before touching `last_heard`. The transport-sender-level signal and the
+    // data-ack arming are gated on a new state being appended at the back
+    // (official `Transport::recv` returns on the dedup check before
+    // `set_ack_num`/`remote_heard`/`set_data_ack`), which a replay never
+    // satisfies. Only the idempotent ack pruning and fragment assembly run for
+    // the out-of-order copy.
     @Test
     func replayedDatagramDoesNotAdvanceLastHeardOrRearmDataAcknowledgement() throws {
         var loop = makeReceivingLoop()
@@ -357,6 +370,171 @@ struct MoshSSPInMemoryLoopTests {
         #expect(try loop.waitTime(nowMilliseconds: 200) == 2_910)
     }
 
+    // A multi-fragment instruction whose COMPLETING datagram is classified
+    // out-of-order still appends a genuinely new state at the back of the
+    // receiver queue, so it must arm the 100ms delayed data-acknowledgement:
+    // official `Transport::recv` runs `set_data_ack()` for any non-empty-diff
+    // state appended at the back, and the transport layer never sees datagram
+    // order (`Connection::recv_one` returns out-of-order payloads for full
+    // processing). The connection-level last-heard, by contrast, stays frozen at
+    // the last in-sequence datagram's clock. (Pre-fix, the in-seq gate swallowed
+    // the arming and the peer's state went un-acked on the fast path.)
+    @Test
+    func outOfOrderCompletionOfNewStateArmsDelayedDataAcknowledgement() throws {
+        var loop = makeReceivingLoop()
+        let instruction = MoshTransportInstruction(
+            protocolVersion: 2,
+            oldNumber: 0,
+            newNumber: 1,
+            acknowledgementNumber: 0,
+            throwawayNumber: 0,
+            diff: Array(repeating: 0x41, count: 40),
+            chaff: []
+        )
+        var fragmenter = MoshFragmenter()
+        let fragments = try fragmenter.makeFragments(
+            for: instruction,
+            maximumSerializedFragmentByteCount: MoshFragment.headerByteCount + 12
+        )
+        #expect(fragments.count >= 2)
+
+        // Every fragment except the first arrives in sequence at t=10; the
+        // instruction stays incomplete.
+        for fragment in fragments.dropFirst() {
+            let result = try loop.receive(packet(for: fragment), nowMilliseconds: 10, isInSequenceOrder: true)
+            #expect(result == .incompleteFragment)
+        }
+        #expect(loop.lastHeardAtMilliseconds == 10)
+
+        // The first fragment arrives late and is classified out-of-order; it
+        // completes the instruction, which is a genuinely NEW state.
+        let completed = try requireInstruction(
+            try loop.receive(packet(for: fragments[0]), nowMilliseconds: 40, isInSequenceOrder: false)
+        )
+        #expect(completed.receiveResult == .accepted(newNumber: 1))
+
+        // Connection-level last-heard stays frozen at the in-sequence clock.
+        #expect(loop.lastHeardAtMilliseconds == 10)
+
+        // The delayed data-ack IS armed from the completion clock: next wakeup is
+        // 40 + 100, not the idle 3000ms cadence. (Pre-fix this was 2960.)
+        #expect(try loop.waitTime(nowMilliseconds: 40) == 100)
+
+        let acknowledgement = try #require(try loop.tick(nowMilliseconds: 140))
+        #expect(acknowledgement.instruction.acknowledgementNumber == 1)
+        #expect(acknowledgement.instruction.diff == [])
+    }
+
+    // The transport-sender-level last-heard ("last time received new state",
+    // official `TransportSender::last_heard`) advances on the out-of-order
+    // completion of a genuinely new peer state, keeping ACTIVE retransmission of
+    // our own unacknowledged state alive. An empty-diff heartbeat isolates the
+    // signal: it appends at the back (advancing the signal, official
+    // `remote_heard`) without arming a data-ack. Pre-fix, the in-seq gate starved
+    // the signal, the active-retry window went cold at the last in-sequence
+    // datagram + ACTIVE_RETRY_TIMEOUT, and the retransmit never fired.
+    @Test
+    func outOfOrderCompletionKeepsActiveRetransmissionAlive() throws {
+        var loop = MoshSSPInMemoryLoop(
+            initialSendState: ByteState(),
+            initialReceiveState: ByteState(),
+            timing: MoshSSPSendTimingConfiguration(
+                sendIntervalMilliseconds: 20,
+                activeRetryTimeoutMilliseconds: 100,
+                timeoutMilliseconds: 50
+            ),
+            chaffSource: .none
+        )
+
+        // Our own state 1 goes out at t=20 and is never acknowledged.
+        loop.setCurrentState(ByteState([9]), nowMilliseconds: 0)
+        _ = try #require(try loop.tick(nowMilliseconds: 20))
+
+        // The peer's empty-diff heartbeat state 1 spans several fragments (via
+        // chaff). All but the first arrive in sequence at t=30.
+        let heartbeat = MoshTransportInstruction(
+            protocolVersion: 2,
+            oldNumber: 0,
+            newNumber: 1,
+            acknowledgementNumber: 0,
+            throwawayNumber: 0,
+            diff: [],
+            chaff: Array(repeating: 0, count: 40)
+        )
+        var fragmenter = MoshFragmenter()
+        let fragments = try fragmenter.makeFragments(
+            for: heartbeat,
+            maximumSerializedFragmentByteCount: MoshFragment.headerByteCount + 12
+        )
+        #expect(fragments.count >= 2)
+        for fragment in fragments.dropFirst() {
+            let result = try loop.receive(packet(for: fragment), nowMilliseconds: 30, isInSequenceOrder: true)
+            #expect(result == .incompleteFragment)
+        }
+
+        // The completing datagram arrives out-of-order at t=100 — after the
+        // in-sequence contact (30) + activeRetryTimeout (100) window would have
+        // expired on its own.
+        let completed = try requireInstruction(
+            try loop.receive(packet(for: fragments[0]), nowMilliseconds: 100, isInSequenceOrder: false)
+        )
+        #expect(completed.receiveResult == .accepted(newNumber: 1))
+        #expect(loop.lastHeardAtMilliseconds == 30)
+
+        // The retransmit of our unacked state 1 becomes due at
+        // lastSentAt(20) + timeout(50) + ackDelay(100) = 170, which requires the
+        // active-retry window to still be hot at 169/170: only the new-state
+        // append at t=100 keeps it so (100 + 100 > 170).
+        #expect(try loop.waitTime(nowMilliseconds: 169) == 1)
+        let retransmission = try #require(try loop.tick(nowMilliseconds: 170))
+        #expect(retransmission.instruction.newNumber == 1)
+        #expect(retransmission.instruction.diff == [9])
+    }
+
+    // An in-sequence retransmission of the CURRENT latest state is deduped by
+    // state number: official `Transport::recv` returns on the dedup check BEFORE
+    // `set_ack_num`/`remote_heard`/`set_data_ack`, so it must not arm a fresh
+    // delayed data-acknowledgement — otherwise every server retransmit would
+    // mint a fresh empty ack ~100ms later. Connection-level last-heard still
+    // advances: the datagram itself is in-sequence, authentic contact.
+    @Test
+    func inSequenceDuplicateOfLatestStateDoesNotArmDataAcknowledgement() throws {
+        var loop = makeReceivingLoop()
+        let dataInstruction = MoshTransportInstruction(
+            protocolVersion: 2,
+            oldNumber: 0,
+            newNumber: 1,
+            acknowledgementNumber: 0,
+            throwawayNumber: 0,
+            diff: [0x41],
+            chaff: []
+        )
+        let packet = try singleFragmentPacket(for: dataInstruction)
+
+        let accepted = try requireInstruction(
+            try loop.receive(packet, nowMilliseconds: 10, isInSequenceOrder: true)
+        )
+        #expect(accepted.receiveResult == .accepted(newNumber: 1))
+        #expect(try loop.waitTime(nowMilliseconds: 10) == 100)
+
+        // Fire the armed data-ack so the scheduler falls back to the idle 3000ms
+        // cadence (next acknowledgement due at 110 + 3000 = 3110).
+        _ = try #require(try loop.tick(nowMilliseconds: 110))
+
+        // The peer retransmits the identical state in sequence at t=200.
+        let duplicate = try requireInstruction(
+            try loop.receive(packet, nowMilliseconds: 200, isInSequenceOrder: true)
+        )
+        #expect(duplicate.receiveResult == .duplicate(newNumber: 1))
+
+        // Connection-level contact advances: the datagram is in-sequence.
+        #expect(loop.lastHeardAtMilliseconds == 200)
+
+        // But no fresh data-ack is armed: the next wakeup stays on the idle
+        // cadence (3110 - 200 = 2910), not pulled to 200 + 100. (Pre-fix: 100.)
+        #expect(try loop.waitTime(nowMilliseconds: 200) == 2_910)
+    }
+
     @Test
     func shutdownAcknowledgementPrunesSenderThroughMaximumState() throws {
         var client = MoshSSPInMemoryLoop(
@@ -399,6 +577,14 @@ private func makeReceivingLoop() -> MoshSSPInMemoryLoop<ByteState, ByteState> {
         initialSendState: ByteState(),
         initialReceiveState: ByteState(),
         chaffSource: .none
+    )
+}
+
+private func packet(for fragment: MoshFragment) -> MoshPacketPlaintext {
+    MoshPacketPlaintext(
+        timestamp: UInt16.max,
+        timestampReply: UInt16.max,
+        payload: fragment.serializedBytes()
     )
 }
 
@@ -481,6 +667,44 @@ private func receiveTimestampReply(
     let result = try requireInstruction(try loop.receive(packet, nowMilliseconds: nowMilliseconds))
 
     #expect(result.receiveResult == .missingReference(oldNumber: 99))
+}
+
+/// Delivers a genuinely-new, empty-diff heartbeat that is APPLIED at the back of
+/// the receiver queue (so it advances the transport-sender last-heard signal
+/// that gates active retransmission), carrying the given timestamp reply (so it
+/// controls the SRTT estimate). The empty diff means no delayed data-acknowledgement
+/// is armed, isolating the SRTT-controlled retransmit timeline.
+private func receiveHeardTimestampReply(
+    _ timestampReply: UInt16,
+    newNumber: UInt64,
+    into loop: inout MoshSSPInMemoryLoop<ByteState, ByteState>,
+    nowMilliseconds: UInt64
+) throws {
+    var fragmenter = MoshFragmenter()
+    let instruction = MoshTransportInstruction(
+        protocolVersion: 2,
+        oldNumber: newNumber - 1,
+        newNumber: newNumber,
+        acknowledgementNumber: 0,
+        throwawayNumber: 0,
+        diff: [],
+        chaff: []
+    )
+    let fragment = try #require(
+        try fragmenter.makeFragments(
+            for: instruction,
+            maximumSerializedFragmentByteCount: 256
+        ).first
+    )
+    let packet = MoshPacketPlaintext(
+        timestamp: UInt16.max,
+        timestampReply: timestampReply,
+        payload: fragment.serializedBytes()
+    )
+
+    let result = try requireInstruction(try loop.receive(packet, nowMilliseconds: nowMilliseconds))
+
+    #expect(result.receiveResult == .accepted(newNumber: newNumber))
 }
 
 private struct TestFailure: Error {}

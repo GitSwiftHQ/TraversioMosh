@@ -146,8 +146,11 @@ public struct MoshSSPInMemoryLoop<
         self.scheduler.sendIntervalMilliseconds
     }
 
-    /// Clock time (ms) of the most recent in-sequence datagram/acknowledgement, or
-    /// `nil` before first contact. Informational liveness signal only.
+    /// Clock time (ms) of the most recent in-sequence datagram, or `nil` before
+    /// first contact. Connection-level liveness signal (official
+    /// `Connection::last_heard`), informational only; the separate
+    /// transport-sender-level signal that gates active retransmission advances
+    /// on new-state appends instead.
     public var lastHeardAtMilliseconds: UInt64? {
         self.scheduler.lastHeardAtMilliseconds
     }
@@ -235,16 +238,16 @@ public struct MoshSSPInMemoryLoop<
         // `Connection::recv_one` (network/network.cc ~482-524): when a datagram's
         // seq is below `expected_receiver_seq` it "don't use (but do return)
         // out-of-order packets for timestamp or targeting" and returns the payload
-        // before touching `saved_timestamp`, the RTT estimator, or `last_heard`.
-        // Skipping these is security-sensitive: a replayed datagram must not be
-        // able to move the timestamp/RTT estimators. The transport-level work
-        // below (ack processing, state application) still runs for the returned
-        // out-of-order payload exactly as official's `Transport::recv` does, but
-        // its two ordering-sensitive side effects — advancing the `last_heard`
-        // liveness signal and arming the delayed data-acknowledgement — are gated
-        // on `isInSequenceOrder` too. Only the idempotent ack-*number* advance and
-        // state application run unconditionally; a replay must not be able to mask
-        // a real outage in the liveness signal or keep the active-retry timer hot.
+        // before touching `saved_timestamp`, the RTT estimator, or the
+        // connection-level `last_heard`. Skipping these is security-sensitive: a
+        // replayed datagram must not be able to move the timestamp/RTT estimators
+        // or mask a real outage in the liveness signal. The transport-level work
+        // below (ack processing, state application, and — when a genuinely new
+        // state is appended at the back of the receiver queue — the
+        // transport-sender last-heard advance and delayed data-acknowledgement
+        // arming) runs in full for the returned out-of-order payload, exactly as
+        // official's `Transport::recv` does: that layer never sees datagram
+        // sequence order and gates its side effects on the state append instead.
         if isInSequenceOrder {
             if packet.timestamp != Self.packetTimestampNoReply {
                 self.pendingTimestampReply = PendingTimestampReply(
@@ -273,20 +276,25 @@ public struct MoshSSPInMemoryLoop<
         }
 
         let receiveResult = try self.receiver.receive(instruction, nowMilliseconds: nowMilliseconds)
-        if self.receiver.acknowledgementNumber == instruction.newNumber {
-            // Official Mosh (`network/networktransport-impl.h` recv ~168-173)
-            // always `set_ack_num` when a state is appended at the back but only
-            // `set_data_ack` `if ( !inst.diff().empty() )`. An empty-diff
-            // heartbeat therefore advances the ack number without arming the
-            // delayed data-acknowledgement; otherwise two instances trade empty
-            // acks forever, because each empty ack mints a fresh state number
-            // that the peer would then delay-ack in turn.
+        if case .accepted(let acceptedNumber) = receiveResult,
+           self.receiver.acknowledgementNumber == acceptedNumber {
+            // The state was appended at the BACK of the receiver queue: only
+            // official Mosh's `received_states.push_back` path
+            // (`network/networktransport-impl.h` recv ~167-173) runs
+            // `set_ack_num`, `remote_heard`, and — gated on
+            // `!inst.diff().empty()` — `set_data_ack`. A duplicate (including an
+            // in-sequence retransmission of the current latest state) returns on
+            // the dedup check before all three, so it must not mint a fresh
+            // delayed empty ack; an accepted-but-out-of-order state number
+            // inserted mid-queue returns before them too. The empty-diff gate on
+            // the data-acknowledgement prevents two instances trading empty acks
+            // forever, because each empty ack mints a fresh state number that
+            // the peer would then delay-ack in turn.
             let hadNonEmptyDiff = (instruction.diff?.isEmpty == false)
             self.scheduler.noteReceivedState(
-                number: self.receiver.acknowledgementNumber,
+                number: acceptedNumber,
                 hadNonEmptyDiff: hadNonEmptyDiff,
-                nowMilliseconds: nowMilliseconds,
-                isInSequenceOrder: isInSequenceOrder
+                nowMilliseconds: nowMilliseconds
             )
         }
 
