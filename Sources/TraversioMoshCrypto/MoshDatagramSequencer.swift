@@ -9,7 +9,9 @@ public enum MoshDatagramSequencerError: Error, Equatable, Sendable {
     /// The session has sealed the maximum number of AES blocks permitted under
     /// one key. Carries the cumulative block count that would have been reached.
     /// Fail-closed and fatal: the datagram that crossed the limit is not
-    /// emitted, mirroring how `sendSequenceExhausted` is handled.
+    /// emitted, mirroring how `sendSequenceExhausted` is handled. Also thrown
+    /// by the initializer when `initialBlocksEncrypted` already sits at or
+    /// beyond the limit, so an exhausted key can never seal at all.
     case blockEncryptionLimitReached(UInt64)
 }
 
@@ -63,6 +65,12 @@ public struct MoshDatagramSequencer: ~Copyable, Sendable {
         guard initialExpectedReceiveSequence <= MoshPacketNonce.sequenceMask + 1 else {
             throw MoshPacketNonceError.sequenceOutOfRange(initialExpectedReceiveSequence)
         }
+        // A resumed block count at or beyond the cap means the key's budget is
+        // already exhausted: fail closed at construction rather than sealing
+        // anything (and rather than letting `seal`'s accounting overflow).
+        guard initialBlocksEncrypted < Self.blockEncryptionLimit else {
+            throw MoshDatagramSequencerError.blockEncryptionLimitReached(initialBlocksEncrypted)
+        }
 
         self.cipher = cipher
         self.sendDirection = sendDirection
@@ -115,6 +123,15 @@ public struct MoshDatagramSequencer: ~Copyable, Sendable {
         self.blocksEncrypted
     }
 
+    /// Test-only hook: forwards to the cipher's key-material deinit-wipe
+    /// observer, proving the wipe chain fires when the sequencer is destroyed.
+    /// See `MoshAES128OCB._installKeyMaterialDeinitWipeHook`.
+    internal borrowing func _installKeyMaterialDeinitWipeHook(
+        _ observer: @escaping @Sendable (_ zeroedOnDeinit: Bool) -> Void
+    ) {
+        self.cipher._installKeyMaterialDeinitWipeHook(observer)
+    }
+
     public mutating func seal(plaintext: [UInt8]) throws -> [UInt8] {
         guard self.nextSendSequence <= MoshPacketNonce.sequenceMask else {
             throw MoshDatagramSequencerError.sendSequenceExhausted(self.nextSendSequence)
@@ -127,12 +144,16 @@ public struct MoshDatagramSequencer: ~Copyable, Sendable {
         let blockSize = UInt64(MoshAES128OCB.blockSize)
         let plaintextCount = UInt64(plaintext.count)
         let sealedBlocks = plaintextCount / blockSize + (plaintextCount % blockSize == 0 ? 0 : 1)
-        let projectedBlocks = self.blocksEncrypted + sealedBlocks
 
         // Fail closed before emitting the datagram that would cross the limit,
-        // mirroring official's throw prior to returning the ciphertext.
-        guard projectedBlocks < Self.blockEncryptionLimit else {
-            throw MoshDatagramSequencerError.blockEncryptionLimitReached(projectedBlocks)
+        // mirroring official's throw prior to returning the ciphertext. The
+        // checked add cannot overflow after init validated the starting count
+        // below 2^47, but if it ever did, throw instead of trapping.
+        let (projectedBlocks, overflowed) = self.blocksEncrypted.addingReportingOverflow(sealedBlocks)
+        guard !overflowed, projectedBlocks < Self.blockEncryptionLimit else {
+            throw MoshDatagramSequencerError.blockEncryptionLimitReached(
+                overflowed ? .max : projectedBlocks
+            )
         }
 
         let datagram = try self.cipher.seal(

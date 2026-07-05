@@ -31,6 +31,14 @@ public struct MoshDatagramCipher: Sendable {
         self.ocb = try MoshAES128OCB(rawKey: rawKey)
     }
 
+    /// Test-only hook: forwards to `MoshAES128OCB`'s key-material deinit-wipe
+    /// observer. See `MoshAES128OCB._installKeyMaterialDeinitWipeHook`.
+    internal func _installKeyMaterialDeinitWipeHook(
+        _ observer: @escaping @Sendable (_ zeroedOnDeinit: Bool) -> Void
+    ) {
+        self.ocb._installKeyMaterialDeinitWipeHook(observer)
+    }
+
     public func seal(plaintext: [UInt8], nonce: MoshPacketNonce) throws -> [UInt8] {
         let sealedPayload = try self.ocb.seal(plaintext: plaintext, nonce: nonce.rawBytes)
         return nonce.datagramBytes + sealedPayload

@@ -17,20 +17,43 @@ public struct MoshAES128OCB: Sendable {
     public static let blockSize = 16
     public static let tagSize = 16
 
-    private let blockCipher: AES128BlockCipher
-    private let lStar: Block
-    private let lDollar: Block
-    private let lZero: Block
+    /// All long-lived key-derived material (raw AES key plus the OCB L table)
+    /// lives in this shared, reference-backed storage and is zeroed when the
+    /// last copy of the cipher chain is deallocated. See `OCBKeyMaterial`.
+    private let material: OCBKeyMaterial
+
+    private var lStar: Block { self.material.lStar }
+    private var lDollar: Block { self.material.lDollar }
+    private var lZero: Block { self.material.lZero }
 
     public init(sessionKey: MoshSessionKey) throws {
-        try self.init(rawKey: sessionKey.rawBytes)
+        // Copies the key straight from the session key's locked buffer into
+        // the cipher's own wipeable storage, without an intermediate array.
+        self.material = try sessionKey.withUnsafeKeyBytes { keyBytes in
+            try OCBKeyMaterial(key: keyBytes)
+        }
     }
 
     public init(rawKey: some Collection<UInt8>) throws {
-        self.blockCipher = try AES128BlockCipher(key: Array(rawKey))
-        self.lStar = try self.blockCipher.encrypt(.zero)
-        self.lDollar = self.lStar.doubled()
-        self.lZero = self.lDollar.doubled()
+        // The local intermediate is best-effort wiped; if `rawKey` is itself a
+        // `[UInt8]`, the caller-owned original remains the caller's
+        // responsibility (copy-on-write prevents wiping it from here).
+        var keyBytes = Array(rawKey)
+        defer { MoshKeyWipe.bestEffort(&keyBytes) }
+
+        self.material = try keyBytes.withUnsafeBufferPointer { buffer in
+            try OCBKeyMaterial(key: buffer)
+        }
+    }
+
+    /// Test-only hook: observes the key-material wipe that runs when the last
+    /// reference to this cipher's key material is released. The observer is
+    /// called from `deinit`, after `memset_s`, with whether the material reads
+    /// as all-zero. Not synchronized — install before sharing across tasks.
+    internal func _installKeyMaterialDeinitWipeHook(
+        _ observer: @escaping @Sendable (_ zeroedOnDeinit: Bool) -> Void
+    ) {
+        self.material.deinitWipeObserver = observer
     }
 
     public func seal(
@@ -55,7 +78,7 @@ public struct MoshAES128OCB: Sendable {
 
             let range = ((blockIndex - 1) * Self.blockSize)..<(blockIndex * Self.blockSize)
             let plaintextBlock = Block(Array(plaintext[range]))
-            let encrypted = try self.blockCipher.encrypt(plaintextBlock.xored(with: offset))
+            let encrypted = try self.material.encrypt(plaintextBlock.xored(with: offset))
             let ciphertextBlock = encrypted.xored(with: offset)
 
             ciphertext.append(contentsOf: ciphertextBlock.bytes)
@@ -65,7 +88,7 @@ public struct MoshAES128OCB: Sendable {
         let tag: Block
         if partialByteCount > 0 {
             let offsetStar = offset.xored(with: self.lStar)
-            let pad = try self.blockCipher.encrypt(offsetStar)
+            let pad = try self.material.encrypt(offsetStar)
             let partialStart = fullBlockCount * Self.blockSize
             let partial = Array(plaintext[partialStart...])
 
@@ -74,13 +97,13 @@ public struct MoshAES128OCB: Sendable {
             }
 
             checksum.xorInPlace(Block.padded(partial))
-            tag = try self.blockCipher.encrypt(
+            tag = try self.material.encrypt(
                 checksum
                     .xored(with: offsetStar)
                     .xored(with: self.lDollar)
             ).xored(with: hash)
         } else {
-            tag = try self.blockCipher.encrypt(
+            tag = try self.material.encrypt(
                 checksum
                     .xored(with: offset)
                     .xored(with: self.lDollar)
@@ -121,7 +144,7 @@ public struct MoshAES128OCB: Sendable {
 
             let range = ((blockIndex - 1) * Self.blockSize)..<(blockIndex * Self.blockSize)
             let ciphertextBlock = Block(Array(ciphertextCore[range]))
-            let decrypted = try self.blockCipher.decrypt(ciphertextBlock.xored(with: offset))
+            let decrypted = try self.material.decrypt(ciphertextBlock.xored(with: offset))
             let plaintextBlock = decrypted.xored(with: offset)
 
             plaintext.append(contentsOf: plaintextBlock.bytes)
@@ -131,7 +154,7 @@ public struct MoshAES128OCB: Sendable {
         let expectedTag: Block
         if partialByteCount > 0 {
             let offsetStar = offset.xored(with: self.lStar)
-            let pad = try self.blockCipher.encrypt(offsetStar)
+            let pad = try self.material.encrypt(offsetStar)
             let partialStart = fullBlockCount * Self.blockSize
             let partialCiphertext = Array(ciphertextCore[partialStart...])
             var partialPlaintext: [UInt8] = []
@@ -143,13 +166,13 @@ public struct MoshAES128OCB: Sendable {
 
             plaintext.append(contentsOf: partialPlaintext)
             checksum.xorInPlace(Block.padded(partialPlaintext))
-            expectedTag = try self.blockCipher.encrypt(
+            expectedTag = try self.material.encrypt(
                 checksum
                     .xored(with: offsetStar)
                     .xored(with: self.lDollar)
             ).xored(with: hash)
         } else {
-            expectedTag = try self.blockCipher.encrypt(
+            expectedTag = try self.material.encrypt(
                 checksum
                     .xored(with: offset)
                     .xored(with: self.lDollar)
@@ -180,7 +203,7 @@ public struct MoshAES128OCB: Sendable {
 
             let range = ((blockIndex - 1) * Self.blockSize)..<(blockIndex * Self.blockSize)
             let associatedBlock = Block(Array(associatedData[range]))
-            let encrypted = try self.blockCipher.encrypt(associatedBlock.xored(with: offset))
+            let encrypted = try self.material.encrypt(associatedBlock.xored(with: offset))
             sum.xorInPlace(encrypted)
         }
 
@@ -188,7 +211,7 @@ public struct MoshAES128OCB: Sendable {
             offset.xorInPlace(self.lStar)
             let partialStart = fullBlockCount * Self.blockSize
             let partial = Array(associatedData[partialStart...])
-            let encrypted = try self.blockCipher.encrypt(Block.padded(partial).xored(with: offset))
+            let encrypted = try self.material.encrypt(Block.padded(partial).xored(with: offset))
             sum.xorInPlace(encrypted)
         }
 
@@ -203,7 +226,7 @@ public struct MoshAES128OCB: Sendable {
         let bottom = Int(formattedNonce[Self.blockSize - 1] & 0x3f)
         formattedNonce[Self.blockSize - 1] &= 0xc0
 
-        let kTop = try self.blockCipher.encrypt(Block(formattedNonce))
+        let kTop = try self.material.encrypt(Block(formattedNonce))
         var stretch = kTop.bytes
         for index in 0..<8 {
             stretch.append(kTop.bytes[index] ^ kTop.bytes[index + 1])
@@ -249,15 +272,71 @@ public struct MoshAES128OCB: Sendable {
     }
 }
 
-private struct AES128BlockCipher: Sendable {
-    private let key: [UInt8]
+/// Owns every long-lived piece of key-derived material for one OCB cipher and
+/// guarantees it is zeroed when the cipher chain is deallocated.
+///
+/// Official Mosh destroys the AES key schedule and OCB offset table in
+/// `Session::~Session` via `ae_clear` (`crypto.cc`; `ocb_internal.cc` zeroes
+/// the whole `ae_ctx` with `memset`, `ocb_openssl.cc` uses `OPENSSL_cleanse`).
+/// This class is the Swift counterpart: one fixed heap allocation holding the
+/// raw AES-128 key and the derived L table, wiped with `memset_s` in `deinit`.
+/// Because `MoshAES128OCB` (and the cipher/sequencer structs wrapping it) all
+/// share this one reference, the wipe fires exactly when the last copy dies.
+///
+/// Buffer layout: `[0..<16]` raw key, `[16..<32]` L*, `[32..<48]` L$,
+/// `[48..<64]` L0 (RFC 7253 section 2, key-dependent constants).
+///
+/// Honest limitations, matching official Mosh's own scope (`ae_clear` zeroes
+/// the context; stack temporaries are not wiped there either):
+/// - CommonCrypto expands and releases its own AES key schedule inside each
+///   `CCCrypt` call; that internal copy is outside our control.
+/// - Transient per-datagram `Block` values (offsets, checksums, pads, doubled
+///   L values) live in short-lived Swift arrays and are not wiped.
+///
+/// Concurrency: the buffer is written only during `init` and `deinit` (both
+/// exclusive by construction) and is read-only in between, so unsynchronized
+/// concurrent reads are safe and `@unchecked Sendable` is sound. The optional
+/// deinit observer is a test-only hook, mutated without synchronization;
+/// install it before the cipher is shared across tasks.
+private final class OCBKeyMaterial: @unchecked Sendable {
+    private static let keyOffset = 0
+    private static let lStarOffset = MoshAES128OCB.blockSize
+    private static let lDollarOffset = 2 * MoshAES128OCB.blockSize
+    private static let lZeroOffset = 3 * MoshAES128OCB.blockSize
+    private static let byteCount = 4 * MoshAES128OCB.blockSize
 
-    init(key: [UInt8]) throws {
+    private let buffer: UnsafeMutableBufferPointer<UInt8>
+
+    /// Test-only: called from `deinit` after the wipe, before deallocation,
+    /// with whether the material reads as all-zero.
+    var deinitWipeObserver: (@Sendable (Bool) -> Void)?
+
+    init(key: UnsafeBufferPointer<UInt8>) throws {
         guard key.count == MoshSessionKey.byteCount else {
             throw MoshSessionKeyError.invalidRawByteCount(key.count)
         }
-        self.key = key
+
+        let allocated = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: Self.byteCount)
+        allocated.initialize(repeating: 0)
+        for index in 0..<key.count {
+            allocated[Self.keyOffset + index] = key[index]
+        }
+        self.buffer = allocated
+
+        // Derive the OCB L table (RFC 7253 section 2):
+        //   L* = E_K(0^128), L$ = double(L*), L0 = double(L$).
+        // If encryption throws, Swift still runs `deinit` for the fully
+        // initialized instance, so the buffer is wiped and deallocated.
+        let lStar = try self.encrypt(.zero)
+        let lDollar = lStar.doubled()
+        self.store(lStar, at: Self.lStarOffset)
+        self.store(lDollar, at: Self.lDollarOffset)
+        self.store(lDollar.doubled(), at: Self.lZeroOffset)
     }
+
+    var lStar: Block { self.block(at: Self.lStarOffset) }
+    var lDollar: Block { self.block(at: Self.lDollarOffset) }
+    var lZero: Block { self.block(at: Self.lZeroOffset) }
 
     func encrypt(_ block: Block) throws -> Block {
         try self.crypt(block, operation: CCOperation(kCCEncrypt))
@@ -267,27 +346,39 @@ private struct AES128BlockCipher: Sendable {
         try self.crypt(block, operation: CCOperation(kCCDecrypt))
     }
 
+    private func block(at offset: Int) -> Block {
+        let slice = self.buffer[offset..<(offset + MoshAES128OCB.blockSize)]
+        return Block(Array(UnsafeBufferPointer(rebasing: slice)))
+    }
+
+    private func store(_ block: Block, at offset: Int) {
+        for index in 0..<MoshAES128OCB.blockSize {
+            self.buffer[offset + index] = block.bytes[index]
+        }
+    }
+
     private func crypt(_ block: Block, operation: CCOperation) throws -> Block {
         var output = [UInt8](repeating: 0, count: MoshAES128OCB.blockSize)
         var bytesMoved = 0
 
-        let status = self.key.withUnsafeBytes { keyBuffer in
-            block.bytes.withUnsafeBytes { inputBuffer in
-                output.withUnsafeMutableBytes { outputBuffer in
-                    CCCrypt(
-                        operation,
-                        CCAlgorithm(kCCAlgorithmAES),
-                        CCOptions(kCCOptionECBMode),
-                        keyBuffer.baseAddress,
-                        self.key.count,
-                        nil,
-                        inputBuffer.baseAddress,
-                        MoshAES128OCB.blockSize,
-                        outputBuffer.baseAddress,
-                        MoshAES128OCB.blockSize,
-                        &bytesMoved
-                    )
-                }
+        // `self.buffer` is owned by this instance and outlives the call, so
+        // passing its base address to CCCrypt has no lifetime hazard.
+        let keyPointer = self.buffer.baseAddress! + Self.keyOffset
+        let status = block.bytes.withUnsafeBytes { inputBuffer in
+            output.withUnsafeMutableBytes { outputBuffer in
+                CCCrypt(
+                    operation,
+                    CCAlgorithm(kCCAlgorithmAES),
+                    CCOptions(kCCOptionECBMode),
+                    keyPointer,
+                    MoshSessionKey.byteCount,
+                    nil,
+                    inputBuffer.baseAddress,
+                    MoshAES128OCB.blockSize,
+                    outputBuffer.baseAddress,
+                    MoshAES128OCB.blockSize,
+                    &bytesMoved
+                )
             }
         }
 
@@ -296,6 +387,17 @@ private struct AES128BlockCipher: Sendable {
         }
 
         return Block(output)
+    }
+
+    deinit {
+        if let base = self.buffer.baseAddress, self.buffer.count > 0 {
+            // memset_s is guaranteed not to be optimized away.
+            memset_s(base, self.buffer.count, 0, self.buffer.count)
+        }
+        if let observer = self.deinitWipeObserver {
+            observer(self.buffer.allSatisfy { $0 == 0 })
+        }
+        self.buffer.deallocate()
     }
 }
 

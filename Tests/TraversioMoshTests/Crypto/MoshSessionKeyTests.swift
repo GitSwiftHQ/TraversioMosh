@@ -89,6 +89,31 @@ struct MoshSessionKeyTests {
     }
 
     @Test
+    func concurrentReadsRacingWipeAreMemorySafeAndEndZeroed() async throws {
+        let key = try MoshSessionKey(rawBytes: Array(UInt8(1)..<UInt8(17)))
+        let other = try MoshSessionKey(rawBytes: Array(UInt8(1)..<UInt8(17)))
+
+        // Buffer access is serialized by an internal lock: readers racing the
+        // wipe must observe either the key or all zeros, never torn bytes,
+        // and the process must not crash.
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<4 {
+                group.addTask {
+                    for _ in 0..<250 {
+                        let bytes = key.rawBytes
+                        #expect(bytes.count == MoshSessionKey.byteCount)
+                        _ = key.encodedRepresentation
+                        _ = key == other
+                    }
+                }
+            }
+            group.addTask { key.wipe() }
+        }
+
+        #expect(key.rawBytes == [UInt8](repeating: 0, count: MoshSessionKey.byteCount))
+    }
+
+    @Test
     func independentlyConstructedKeysDoNotShareStorage() throws {
         let bytes = Array(UInt8(1)..<UInt8(17))
         let first = try MoshSessionKey(rawBytes: bytes)

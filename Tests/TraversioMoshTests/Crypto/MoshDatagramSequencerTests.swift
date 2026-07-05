@@ -271,6 +271,49 @@ struct MoshDatagramSequencerTests {
         #expect(sequencer.totalBlocksEncrypted == MoshDatagramSequencer.blockEncryptionLimit - 1)
     }
 
+    @Test(
+        "Initializer rejects initialBlocksEncrypted at or beyond the block limit",
+        arguments: [
+            MoshDatagramSequencer.blockEncryptionLimit,
+            MoshDatagramSequencer.blockEncryptionLimit + 1,
+            UInt64.max, // Previously accepted, then trapped (crashed) on the first seal.
+        ]
+    )
+    func initializerRejectsExhaustedInitialBlockCount(initialBlocks: UInt64) {
+        #expect(
+            throws: MoshDatagramSequencerError.blockEncryptionLimitReached(initialBlocks)
+        ) {
+            _ = try MoshDatagramSequencer(
+                rawKey: key,
+                sendDirection: .toServer,
+                receiveDirection: .toClient,
+                initialBlocksEncrypted: initialBlocks
+            )
+        }
+    }
+
+    @Test
+    func nearLimitAccumulationThrowsInsteadOfTrapping() throws {
+        // The largest admissible starting count. Any sealed block must throw
+        // the limit error; nothing on this path may trap.
+        var sequencer = try MoshDatagramSequencer(
+            rawKey: key,
+            sendDirection: .toServer,
+            receiveDirection: .toClient,
+            initialBlocksEncrypted: MoshDatagramSequencer.blockEncryptionLimit - 1
+        )
+
+        #expect(
+            throws: MoshDatagramSequencerError.blockEncryptionLimitReached(
+                MoshDatagramSequencer.blockEncryptionLimit + 3
+            )
+        ) {
+            // 4 blocks: 2^47 - 1 + 4 crosses the cap without any trap.
+            _ = try sequencer.seal(plaintext: [UInt8](repeating: 0, count: 64))
+        }
+        #expect(sequencer.totalBlocksEncrypted == MoshDatagramSequencer.blockEncryptionLimit - 1)
+    }
+
     @Test
     func sealFailsClosedWhenMultiBlockPlaintextCrossesLimit() throws {
         var sequencer = try MoshDatagramSequencer(
