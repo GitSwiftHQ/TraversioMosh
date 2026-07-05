@@ -43,16 +43,30 @@ public protocol MoshSessionTimer: Sendable {
 /// Policy governing automatic link rebuild (transport-death resilience) and the
 /// informational no-contact liveness signal.
 public struct MoshSessionResilienceConfiguration: Sendable {
-    /// Maximum number of consecutive link-rebuild attempts after a transport
-    /// failure before the session gives up and tears down with the last error.
-    /// `nil` retries indefinitely (bounded only by backoff), matching Mosh's
-    /// promise that a session survives arbitrarily long outages. A genuinely-down
-    /// network never tight-loops because each attempt is separated by backoff.
+    /// Maximum number of consecutive link-rebuild attempts before the session
+    /// gives up and tears down. An attempt only stops counting as consecutive
+    /// once the server is actually HEARD on a rebuilt link — merely installing a
+    /// fresh socket proves nothing (`NWConnection.start()` returns before any
+    /// contact), so a dead network cannot launder the counter through rebuilds
+    /// that "succeed" and immediately fail again. `nil` retries indefinitely
+    /// (bounded only by backoff), matching Mosh's promise that a session
+    /// survives arbitrarily long outages.
     public var maximumLinkRebuildAttempts: Int?
-    /// Backoff before the first rebuild attempt (ms). Doubles each attempt.
+    /// Backoff between rebuild attempts (ms), doubling per consecutive attempt.
+    /// Clamped to at least 1 ms so the doubling can never degenerate into a
+    /// zero-delay retry loop.
     public var initialRebuildBackoffMilliseconds: UInt64
     /// Upper bound on the exponential backoff interval (ms).
     public var maximumRebuildBackoffMilliseconds: UInt64
+    /// When the server has been silent for at least this long AND the current
+    /// link has been installed for at least this long, the session proactively
+    /// rebuilds the link (fresh socket = fresh source port) even though the
+    /// transport never reported a failure. This is the client port hop official
+    /// Mosh performs in `Connection::send` (`network/network.cc`,
+    /// `PORT_HOP_INTERVAL` = 10 s): the dominant transport-death mode — a NAT
+    /// mapping silently dropped or a UDP path blackholed — never faults the
+    /// socket, so recovery must be time-driven, not error-driven. `0` disables.
+    public var portHopIntervalMilliseconds: UInt64
     /// When the time since the server was last heard from crosses this threshold,
     /// the session emits a single informational `.noContact` diagnostic (reset once
     /// contact resumes). Purely informational — it NEVER tears the session down;
@@ -64,14 +78,16 @@ public struct MoshSessionResilienceConfiguration: Sendable {
         maximumLinkRebuildAttempts: Int? = nil,
         initialRebuildBackoffMilliseconds: UInt64 = 200,
         maximumRebuildBackoffMilliseconds: UInt64 = 10_000,
+        portHopIntervalMilliseconds: UInt64 = 10_000,
         noContactThresholdMilliseconds: UInt64 = 60_000
     ) {
         self.maximumLinkRebuildAttempts = maximumLinkRebuildAttempts
-        self.initialRebuildBackoffMilliseconds = initialRebuildBackoffMilliseconds
+        self.initialRebuildBackoffMilliseconds = max(1, initialRebuildBackoffMilliseconds)
         self.maximumRebuildBackoffMilliseconds = max(
-            initialRebuildBackoffMilliseconds,
+            self.initialRebuildBackoffMilliseconds,
             maximumRebuildBackoffMilliseconds
         )
+        self.portHopIntervalMilliseconds = portHopIntervalMilliseconds
         self.noContactThresholdMilliseconds = noContactThresholdMilliseconds
     }
 }
@@ -90,17 +106,25 @@ public struct MoshSessionLiveness: Equatable, Sendable {
     public let smoothedRoundTripMilliseconds: Double
     /// Round-trip time variation estimate (ms).
     public let roundTripVariationMilliseconds: Double
+    /// Description of the most recent `link.send` failure that was recorded and
+    /// swallowed (transient send tolerance), or `nil` if the last send
+    /// succeeded. Mirrors official `Connection::send_error` and is the host's
+    /// immediate signal of an outbound outage, ahead of the slower `.noContact`
+    /// diagnostic.
+    public let recordedSendErrorDescription: String?
 
     public init(
         lastHeardFromServerMilliseconds: UInt64?,
         millisecondsSinceLastHeard: UInt64,
         smoothedRoundTripMilliseconds: Double,
-        roundTripVariationMilliseconds: Double
+        roundTripVariationMilliseconds: Double,
+        recordedSendErrorDescription: String? = nil
     ) {
         self.lastHeardFromServerMilliseconds = lastHeardFromServerMilliseconds
         self.millisecondsSinceLastHeard = millisecondsSinceLastHeard
         self.smoothedRoundTripMilliseconds = smoothedRoundTripMilliseconds
         self.roundTripVariationMilliseconds = roundTripVariationMilliseconds
+        self.recordedSendErrorDescription = recordedSendErrorDescription
     }
 }
 
@@ -155,6 +179,9 @@ public enum MoshSessionError: Error, Equatable, Sendable {
     case notStarted
     case stopped
     case shutdownTimedOut
+    /// The configured `maximumLinkRebuildAttempts` consecutive rebuild attempts
+    /// elapsed without the server being heard from again.
+    case linkRebuildAttemptsExhausted
 }
 
 public enum MoshSessionEvent: Equatable, Sendable {
@@ -174,8 +201,10 @@ public enum MoshSessionEvent: Equatable, Sendable {
     /// session and SSP state. `attempt` counts from 1. Recovery is automatic; the
     /// session is NOT torn down while reconnecting.
     case reconnecting(attempt: Int)
-    /// A fresh datagram link was successfully installed after a transport failure;
-    /// unacknowledged state will be retransmitted over it.
+    /// The server was heard from again on a rebuilt link. Deliberately NOT
+    /// emitted when the fresh link is merely installed — a socket that opens
+    /// against a dead network proves nothing — so this event means actual
+    /// recovery, mirroring official Mosh crediting `last_roundtrip_success`.
     case reconnected
     /// The server has not been heard from for at least the configured no-contact
     /// threshold. Informational (for "last contact Ns ago" rendering); emitted once
@@ -189,7 +218,19 @@ public actor MoshSession {
     public typealias RenderOperationStream = AsyncThrowingStream<MoshTerminalRenderOperation, Error>
     public typealias DiagnosticEventStream = AsyncStream<MoshSessionEvent>
 
+    /// Raw wire operations decoded from server diffs, forwarded only when a diff
+    /// chains from the exact host state this stream last rendered.
+    ///
+    /// This stream emits NOTHING for a re-based diff (one whose `oldNumber` is not
+    /// the last-rendered state, possible whenever an acknowledgement is lost) and
+    /// carries no resync signal, so it is not sufficient for exact incremental
+    /// reconstruction of the screen across a rebase. Consumers that need display
+    /// fidelity must use `renderOperations` (which carries
+    /// `MoshTerminalRenderOperation.resync`) or read `screenSnapshot`.
     public nonisolated let hostOperations: HostOperationStream
+    /// Display-ready operations. Unlike `hostOperations`, this stream emits a
+    /// `MoshTerminalRenderOperation.resync(snapshot)` on a re-based diff, so an
+    /// incremental consumer can stay exact across rebases.
     public nonisolated let renderOperations: RenderOperationStream
     public nonisolated let diagnosticEvents: DiagnosticEventStream
 
@@ -210,6 +251,17 @@ public actor MoshSession {
     private var lastAdoptedHostStateNumber: UInt64 = 0
     private var startedAtMilliseconds: UInt64 = 0
     private var isRebuildingLink = false
+    /// Rebuild attempts since the server was last heard. Reset ONLY by actual
+    /// contact (`handleIncomingInstruction`), never by installing a link, so
+    /// backoff and the attempt bound survive install-then-die churn.
+    private var consecutiveRebuildAttempts = 0
+    /// Set when a rebuilt link is installed; the next received instruction
+    /// emits `.reconnected` and clears it.
+    private var awaitingRebuildContact = false
+    /// Clock time the current link was installed (session start or rebuild).
+    /// Gates the port-hop interval so a freshly hopped link gets a full
+    /// interval to prove itself before the next hop.
+    private var lastLinkInstalledAtMilliseconds: UInt64 = 0
     private var hasEmittedNoContact = false
     private var nextStopWaiterID: UInt64 = 0
     private var stopWaiters: [UInt64: CheckedContinuation<Void, Error>] = [:]
@@ -273,11 +325,13 @@ public actor MoshSession {
             let sinceLastHeard = nowMilliseconds >= reference ? nowMilliseconds - reference : 0
             let smoothedRoundTrip = await self.runtime?.smoothedRoundTripMilliseconds() ?? 0
             let roundTripVariation = await self.runtime?.roundTripVariationMilliseconds() ?? 0
+            let recordedSendError = await self.runtime?.recordedSendError()
             return MoshSessionLiveness(
                 lastHeardFromServerMilliseconds: lastHeard,
                 millisecondsSinceLastHeard: sinceLastHeard,
                 smoothedRoundTripMilliseconds: smoothedRoundTrip,
-                roundTripVariationMilliseconds: roundTripVariation
+                roundTripVariationMilliseconds: roundTripVariation,
+                recordedSendErrorDescription: recordedSendError
             )
         }
     }
@@ -339,6 +393,7 @@ public actor MoshSession {
             self.runtime = runtime
             self.isStarted = true
             self.startedAtMilliseconds = initialNowMilliseconds
+            self.lastLinkInstalledAtMilliseconds = initialNowMilliseconds
             self.hasEmittedNoContact = false
             self.startReceiveTask(runtime: runtime)
             self.startLinkEventTask(runtime: runtime)
@@ -488,18 +543,49 @@ public actor MoshSession {
             return false
         }
 
-        self.diagnosticEventContinuation.yield(
-            .datagramsSent(packetCount: batch.packets.count)
-        )
+        // Only claim datagrams were sent if the link accepted them: a batch
+        // whose sends were all recorded-and-swallowed (transient tolerance)
+        // must not read as healthy outbound traffic. The failure itself is
+        // visible via `liveness.recordedSendErrorDescription`.
+        if await runtime.recordedSendError() == nil {
+            self.diagnosticEventContinuation.yield(
+                .datagramsSent(packetCount: batch.packets.count)
+            )
+        }
         return true
     }
 
     private func handleIncomingInstruction(
         _ instruction: MoshSSPDatagramIncomingInstruction<MoshTerminalHostState>
     ) async throws {
-        // Any received instruction is fresh contact with the server: clear the
-        // no-contact latch so a subsequent outage re-emits the diagnostic.
-        self.hasEmittedNoContact = false
+        // Connection-level "fresh contact" is credited only for an in-sequence
+        // (`.new`) datagram. An authentic but out-of-order/duplicate datagram
+        // arrives as `.replayed`; its payload is still valid state data and is
+        // adopted below (official `recv_one` delivers it), but it does NOT prove
+        // the link is currently alive — the server may have gone silent after
+        // the original transmission. The rest of the codebase gates
+        // connection-level last-heard on in-sequence datagrams for exactly this
+        // reason, so a replay cannot mask an outage; this spot must match.
+        // Clearing the no-contact latch, resetting the consecutive-rebuild
+        // counter, and crediting a pending rebuild (`.reconnected`) are all
+        // connection-level contact signals, so they run only for `.new`.
+        let isFreshContact: Bool
+        switch instruction.receivedDatagram.sequenceStatus {
+        case .new:
+            isFreshContact = true
+        case .replayed:
+            isFreshContact = false
+        }
+        if isFreshContact {
+            // Being HEARD in-sequence, not installing a socket, is what proves
+            // recovery (official Mosh credits `last_roundtrip_success`).
+            self.hasEmittedNoContact = false
+            self.consecutiveRebuildAttempts = 0
+            if self.awaitingRebuildContact {
+                self.awaitingRebuildContact = false
+                self.diagnosticEventContinuation.yield(.reconnected)
+            }
+        }
         let state = instruction.instructionResult.latestState
         // Adopt the newest received framebuffer wholesale (mirrors stmclient.cc's
         // `new_state = network->get_latest_remote_state().state.get_fb()`) instead
@@ -507,19 +593,40 @@ public actor MoshSession {
         // arrives, so a duplicate/heartbeat never re-yields host operations.
         var operations: [MoshHostOperation] = []
         if state.number > self.lastAdoptedHostStateNumber {
+            // A diff's operations can be forwarded incrementally only when the
+            // diff chains from the exact state this session last adopted. A
+            // re-based diff (the server recomputed against an older reference
+            // after a lost acknowledgement) is relative to a frame the stream
+            // consumer never rendered; forwarding it would double-apply
+            // overlapping content. Official Mosh never forwards wire diffs —
+            // its client recomputes every frame from the latest framebuffer
+            // (`display.new_frame`) — so on a re-base we emit a wholesale
+            // `.resync` instead. The host-operation stream, which carries raw
+            // wire operations, emits nothing for a re-based diff.
+            let chainsFromAdoptedState =
+                instruction.instructionResult.instruction.oldNumber == self.lastAdoptedHostStateNumber
             self.lastAdoptedHostStateNumber = state.number
             operations = self.terminalEngine.acceptHostState(state.state)
             self.terminalScreen = state.state.terminalScreen
-            for operation in operations {
-                self.hostOperationContinuation.yield(operation)
-                if let renderOperation = MoshTerminalRenderOperation(operation) {
-                    self.renderOperationContinuation.yield(renderOperation)
+            if chainsFromAdoptedState {
+                for operation in operations {
+                    self.hostOperationContinuation.yield(operation)
+                    if let renderOperation = MoshTerminalRenderOperation(operation) {
+                        self.renderOperationContinuation.yield(renderOperation)
+                    }
                 }
+            } else {
+                self.renderOperationContinuation.yield(
+                    .resync(self.terminalScreen.snapshot)
+                )
             }
-            let generatedTerminalToHostBytes = state.state.lastAppliedTerminalToHostBytes
-            if generatedTerminalToHostBytes.isEmpty == false {
-                try await self.updateClientState(.keystrokes(generatedTerminalToHostBytes))
-            }
+            // Terminal-generated replies (DA/DSR) captured while applying the
+            // diff are deliberately NOT transmitted. In official Mosh the
+            // server-side emulator answers such queries; the client never
+            // sends terminal replies (`Complete::apply_string` asserts
+            // `terminal_to_host.empty()`). Transmitting them would inject
+            // duplicate bytes whenever a re-based diff re-applies a query, and
+            // would hand a hostile server a keystroke-injection channel.
         }
         await self.updatePredictionHints(runtime: self.runtime, hostState: state.state)
         self.predictionEngine.cull(
@@ -544,6 +651,7 @@ public actor MoshSession {
         if let runtime = self.runtime, self.isStarted, self.isStopped == false {
             if counterpartyInitiatedShutdown {
                 self.diagnosticEventContinuation.yield(.peerShutdown)
+                await self.acknowledgeCounterpartyShutdown(runtime: runtime)
                 await self.stop()
                 return
             }
@@ -559,6 +667,40 @@ public actor MoshSession {
     /// official Mosh). When our receiver's acknowledgement number reaches this
     /// value, the peer has initiated shutdown.
     private static var shutdownSentinelStateNumber: UInt64 { UInt64.max }
+
+    /// Official Mosh does not exit on merely SEEING the shutdown sentinel: the
+    /// client keeps ticking until a datagram carrying `ack_num = uint64_t(-1)`
+    /// has actually been sent (`counterparty_shutdown_ack_sent()`,
+    /// `frontend/stmclient.cc` ~530), so the server can stop retransmitting its
+    /// final state instead of retrying for up to 10 s. Mirror that here: once
+    /// the sentinel is adopted, every outgoing instruction carries
+    /// acknowledgement `UInt64.max`, so drive the scheduler until one batch
+    /// leaves. The scheduler's shutdown speed-up keeps the wait within a send
+    /// interval; the iteration bound keeps a dead link from stalling `stop()` —
+    /// best-effort delivery is all official offers too (the server has its own
+    /// shutdown retry timeout).
+    private func acknowledgeCounterpartyShutdown(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
+    ) async {
+        for _ in 0..<8 {
+            guard self.isStarted, self.isStopped == false else {
+                return
+            }
+            if (try? await self.sendDueDatagrams()) == true {
+                return
+            }
+            guard let waitMilliseconds = try? await runtime.waitTime() else {
+                return
+            }
+            if waitMilliseconds > 0 {
+                do {
+                    try await self.configuration.timer.sleep(forMilliseconds: waitMilliseconds)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
 
     private func finishFromReceiveTask(throwing error: Error?) async {
         guard self.isStopped == false else {
@@ -760,6 +902,19 @@ public actor MoshSession {
     /// the same endpoint while the crypto session and send sequence continue
     /// unchanged (`runtime.replaceLink` preserves the `~Copyable` sequencer). The
     /// SSP retransmit timer then re-sends unacknowledged state over the new link.
+    ///
+    /// Installing a link is NOT success: `NWConnection.start()` returns before
+    /// any contact, so against a dead network every install would trivially
+    /// "succeed" and immediately fail again. Attempts therefore accumulate in
+    /// `consecutiveRebuildAttempts` — reset only when the server is actually
+    /// heard (`handleIncomingInstruction`) — so backoff keeps growing and the
+    /// configured attempt bound is enforced across install-then-die churn, and
+    /// `.reconnected` is deferred until real contact.
+    ///
+    /// The endpoint handed back to the factory is the one the session was
+    /// configured with; per the documented host responsibility, hosts should
+    /// resolve DNS once and configure an address, so a rebuild does not
+    /// re-resolve to a different server mid-session.
     private func rebuildLink(
         runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
     ) async {
@@ -773,9 +928,28 @@ public actor MoshSession {
         self.isRebuildingLink = true
         defer { self.isRebuildingLink = false }
 
-        var attempt = 0
+        var lastFailure: Error?
         while self.isStarted, self.isStopped == false {
-            attempt += 1
+            self.consecutiveRebuildAttempts += 1
+            let attempt = self.consecutiveRebuildAttempts
+            if let maximumAttempts = self.configuration.resilience.maximumLinkRebuildAttempts,
+               attempt > maximumAttempts {
+                await self.finishFromLinkRebuildFailure(
+                    throwing: lastFailure ?? MoshSessionError.linkRebuildAttemptsExhausted
+                )
+                return
+            }
+            if attempt > 1 {
+                let backoffMilliseconds = self.rebuildBackoffMilliseconds(attempt: attempt)
+                do {
+                    try await self.configuration.timer.sleep(forMilliseconds: backoffMilliseconds)
+                } catch {
+                    return
+                }
+                guard self.isStarted, self.isStopped == false else {
+                    return
+                }
+            }
             self.diagnosticEventContinuation.yield(.reconnecting(attempt: attempt))
             do {
                 let newLink = try await self.configuration.transportFactory.makeDatagramLink(
@@ -787,27 +961,49 @@ public actor MoshSession {
                     return
                 }
                 try await runtime.replaceLink(newLink)
-                self.diagnosticEventContinuation.yield(.reconnected)
-                self.hasEmittedNoContact = false
+                self.awaitingRebuildContact = true
+                self.lastLinkInstalledAtMilliseconds = await self.configuration.clock.nowMilliseconds()
                 // Resume the maintenance/retransmit loop against the new link.
+                // `.reconnected` waits for the server to actually be heard.
                 self.restartMaintenanceTask(runtime: runtime)
                 return
             } catch is CancellationError {
                 return
             } catch {
-                if let maximumAttempts = self.configuration.resilience.maximumLinkRebuildAttempts,
-                   attempt >= maximumAttempts {
-                    await self.finishFromLinkRebuildFailure(throwing: error)
-                    return
-                }
-                let backoffMilliseconds = self.rebuildBackoffMilliseconds(attempt: attempt)
-                do {
-                    try await self.configuration.timer.sleep(forMilliseconds: backoffMilliseconds)
-                } catch {
-                    return
-                }
+                lastFailure = error
             }
         }
+    }
+
+    /// Time-driven client port hop, official Mosh's actual recovery mechanism
+    /// for silent transport death (`Connection::send`, `network/network.cc`
+    /// ~396: hop when nothing has been heard for `PORT_HOP_INTERVAL` and the
+    /// current port choice is at least that old). A NAT mapping that silently
+    /// expires or a blackholed UDP path never faults the socket, so the
+    /// `.linkFailed`-driven rebuild can never fire for the dominant death mode;
+    /// this check, run from the maintenance loop, covers it.
+    private func rebuildLinkIfHopIntervalElapsed(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>
+    ) async {
+        guard self.isRebuildingLink == false, self.isStarted, self.isStopped == false else {
+            return
+        }
+        let interval = self.configuration.resilience.portHopIntervalMilliseconds
+        guard interval > 0 else {
+            return
+        }
+
+        let nowMilliseconds = await self.configuration.clock.nowMilliseconds()
+        let lastHeard = await runtime.lastHeardAtMilliseconds() ?? self.startedAtMilliseconds
+        guard nowMilliseconds >= lastHeard, nowMilliseconds - lastHeard >= interval else {
+            return
+        }
+        guard nowMilliseconds >= self.lastLinkInstalledAtMilliseconds,
+              nowMilliseconds - self.lastLinkInstalledAtMilliseconds >= interval else {
+            return
+        }
+
+        await self.rebuildLink(runtime: runtime)
     }
 
     private func rebuildBackoffMilliseconds(attempt: Int) -> UInt64 {
@@ -882,67 +1078,87 @@ public actor MoshSession {
     ) {
         self.cancelMaintenanceTask()
         let generation = self.maintenanceGeneration
-        self.maintenanceTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-            await self.runMaintenanceLoop(runtime: runtime, generation: generation)
-        }
-    }
-
-    private func runMaintenanceLoop(
-        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>,
-        generation: UInt64
-    ) async {
-        do {
-            while self.shouldContinueMaintenance(generation: generation) {
-                guard let waitMilliseconds = try await runtime.waitTime() else {
+        // The driving task must NOT hold the session strongly across the sleep:
+        // this loop never exits on its own (`waitTime()` is effectively always
+        // non-nil), so a strong capture would pin an abandoned session — and its
+        // runtime, link, and socket — forever, keeping it transmitting
+        // keepalives after the host dropped its last reference. `self` is
+        // therefore re-acquired per phase and released before each sleep; once
+        // the session deallocates, `deinit` cancels this task and the weak
+        // upgrades fail, so the loop ends and the runtime/link chain deinits.
+        self.maintenanceTask = Task { [weak self, timer = self.configuration.timer] in
+            while Task.isCancelled == false {
+                let waitMilliseconds: UInt64?
+                do {
+                    waitMilliseconds = try await runtime.waitTime()
+                } catch {
+                    await self?.finishFromMaintenanceTask(throwing: error, generation: generation)
                     return
                 }
-
-                guard self.shouldContinueMaintenance(generation: generation) else {
+                guard let waitMilliseconds else {
                     return
                 }
 
                 if waitMilliseconds > 0 {
-                    try await self.configuration.timer.sleep(
-                        forMilliseconds: waitMilliseconds
-                    )
+                    do {
+                        try await timer.sleep(forMilliseconds: waitMilliseconds)
+                    } catch {
+                        return
+                    }
                 }
-
-                try Task.checkCancellation()
-                guard self.shouldContinueMaintenance(generation: generation) else {
+                if Task.isCancelled {
                     return
                 }
 
-                // A tick that finds nothing due is BENIGN, exactly as official Mosh's
-                // `TransportSender::tick` (`network/transportsender-impl.h` ~138-187):
-                // when no diff/ack needs sending it simply recomputes timers (clearing
-                // `next_send_time`) and returns — there is no error path that ends the
-                // session. `waitTime()` and `sendDueDatagrams()` are separate actor hops
-                // (each awaits the clock), so an in-flight inbound datagram can legitimately
-                // erase the due-ness the scheduler reported at `waitTime()` — e.g. an ACK
-                // makes the current state match the assumed-receiver state (`nextSendAt` →
-                // nil), or a timestamp-reply raises SRTT and pushes `nextSendAt` into the
-                // future. Treating that as fatal tore down healthy sessions nondeterministically.
-                // We do not spin: after such a no-op the scheduler's timer has recomputed to
-                // a positive wait or nil (the assumed-receiver freshness reset guarantees a
-                // consistent state never reports a due send with an empty diff), so the loop
-                // re-evaluates `waitTime()` and then sleeps or exits.
-                _ = try await self.sendDueDatagrams()
-                await self.emitNoContactIfNeeded(runtime: runtime)
-                if await runtime.shutdownTimedOut() {
-                    throw MoshSessionError.shutdownTimedOut
+                guard let self else {
+                    return
                 }
-                if await runtime.shutdownAcknowledged() {
-                    await self.stop()
+                guard await self.performMaintenanceTick(runtime: runtime, generation: generation) else {
                     return
                 }
             }
+        }
+    }
+
+    private func performMaintenanceTick(
+        runtime: MoshSSPDatagramRuntime<MoshTerminalClientState, MoshTerminalHostState>,
+        generation: UInt64
+    ) async -> Bool {
+        guard self.shouldContinueMaintenance(generation: generation) else {
+            return false
+        }
+
+        do {
+            // A tick that finds nothing due is BENIGN, exactly as official Mosh's
+            // `TransportSender::tick` (`network/transportsender-impl.h` ~138-187):
+            // when no diff/ack needs sending it simply recomputes timers (clearing
+            // `next_send_time`) and returns — there is no error path that ends the
+            // session. `waitTime()` and `sendDueDatagrams()` are separate actor hops
+            // (each awaits the clock), so an in-flight inbound datagram can legitimately
+            // erase the due-ness the scheduler reported at `waitTime()` — e.g. an ACK
+            // makes the current state match the assumed-receiver state (`nextSendAt` →
+            // nil), or a timestamp-reply raises SRTT and pushes `nextSendAt` into the
+            // future. Treating that as fatal tore down healthy sessions nondeterministically.
+            // We do not spin: after such a no-op the scheduler's timer has recomputed to
+            // a positive wait or nil (the assumed-receiver freshness reset guarantees a
+            // consistent state never reports a due send with an empty diff), so the loop
+            // re-evaluates `waitTime()` and then sleeps or exits.
+            _ = try await self.sendDueDatagrams()
+            await self.emitNoContactIfNeeded(runtime: runtime)
+            await self.rebuildLinkIfHopIntervalElapsed(runtime: runtime)
+            if await runtime.shutdownTimedOut() {
+                throw MoshSessionError.shutdownTimedOut
+            }
+            if await runtime.shutdownAcknowledged() {
+                await self.stop()
+                return false
+            }
+            return self.shouldContinueMaintenance(generation: generation)
         } catch is CancellationError {
-            return
+            return false
         } catch {
             await self.finishFromMaintenanceTask(throwing: error, generation: generation)
+            return false
         }
     }
 

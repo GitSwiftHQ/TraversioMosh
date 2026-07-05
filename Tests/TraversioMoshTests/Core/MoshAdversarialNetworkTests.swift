@@ -188,17 +188,19 @@ struct MoshAdversarialNetworkTests {
     // so the security-sensitive round-trip estimator must NOT move (a replay must
     // not be able to steer the RTT/timestamp clock).
     //
-    // The `isInSequenceOrder` gate in MoshSSPInMemoryLoop.receive suppresses
-    // `noteRemoteHeard`/timestamp/RTT for an out-of-order datagram. It now also
-    // gates the two ordering-sensitive side effects of the transport-level work:
-    // `processAcknowledgement` and `noteReceivedState` still advance the idempotent
-    // ack *number* for the returned out-of-order payload, but their `last_heard`
-    // liveness advance and delayed-data-ack arming only fire for an in-sequence
-    // datagram — matching official Mosh, whose `recv_one` returns an out-of-order
-    // packet before touching `last_heard`. So a replayed datagram does NOT advance
-    // the connection's last-heard signal; a replay cannot mask a real outage in the
-    // liveness / no-contact signal or keep the active-retry timer hot. This test
-    // asserts that invariant alongside the RTT/timestamp one.
+    // The `isInSequenceOrder` gate in MoshSSPInMemoryLoop.receive suppresses the
+    // connection-level side effects (`noteRemoteHeard`/timestamp/RTT) for an
+    // out-of-order datagram, matching official Mosh's `recv_one`, which returns
+    // an out-of-order packet before touching `Connection::last_heard`. The
+    // transport-level side effects — the transport-sender last-heard advance and
+    // the delayed data-ack arming — follow a different official rule: they fire
+    // whenever a genuinely NEW state is appended at the back of the receiver
+    // queue (`Transport::recv`'s push_back path), regardless of datagram order.
+    // A replayed datagram is deduped by state number and appends nothing, so it
+    // advances NEITHER signal: only the idempotent ack pruning runs for the
+    // returned out-of-order payload. A replay therefore cannot mask a real
+    // outage in the liveness / no-contact signal or keep the active-retry timer
+    // hot. This test asserts that invariant alongside the RTT/timestamp one.
     @Test
     func duplicateAndReplayAreDedupedAndDoNotMoveRoundTripEstimate() async throws {
         let pair = await MoshInMemoryDatagramLink.connectedPair()

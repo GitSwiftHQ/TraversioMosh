@@ -506,14 +506,19 @@ struct MoshSSPDatagramRuntimeTests {
             await clock.set(20)
             _ = try #require(try await client.sendDueDatagrams())
 
-            // The client hears the server (heartbeat, empty diff so no delayed-ack is
-            // armed), enabling the active-retry retransmit branch.
+            // The client hears the server via a genuinely-new empty-diff heartbeat
+            // (state 1, so it appends at the back and advances the transport-sender
+            // last-heard signal that keeps the ACTIVE_RETRY window hot; empty diff so
+            // no delayed data-ack is armed), enabling the active-retry retransmit
+            // branch. A duplicate of the initial state (newNumber 0) would NOT keep
+            // the window hot — official `Transport::recv` only calls `remote_heard()`
+            // after `received_states.push_back`, which a duplicate never reaches.
             await clock.set(21)
             let heartbeat = try sealedServerDatagram(
                 instruction: MoshTransportInstruction(
                     protocolVersion: 2,
                     oldNumber: 0,
-                    newNumber: 0,
+                    newNumber: 1,
                     acknowledgementNumber: 0,
                     throwawayNumber: 0,
                     diff: [],

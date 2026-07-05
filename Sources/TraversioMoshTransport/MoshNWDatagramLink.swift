@@ -18,6 +18,14 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
     private var isStarted = false
     private var isStopped = false
     private var isReceiving = false
+    /// Tracks `NWConnection`'s `.waiting` state (no viable route). While waiting,
+    /// `send` fails fast instead of enqueueing: Network.framework defers the
+    /// `contentProcessed` completion of queued sends until the path recovers,
+    /// which would suspend the caller (the session's maintenance loop)
+    /// indefinitely — official Mosh's non-blocking `sendto` never blocks, it
+    /// returns an errno that is recorded and tolerated, and time-driven
+    /// recovery (port hop) does the rest.
+    private var isWaitingForPath = false
     private var nextSendID: UInt64 = 0
     private var pendingSends: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var cancelledSendIDs: Set<UInt64> = []
@@ -99,6 +107,12 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         guard self.isStarted else {
             throw MoshDatagramTransportError.notStarted
         }
+        // sendto-parity: fail fast while the path is down rather than parking
+        // the caller on a completion Network.framework will not deliver until
+        // the route returns. The caller records-and-tolerates send errors.
+        guard self.isWaitingForPath == false else {
+            throw MoshDatagramTransportError.notConnected
+        }
 
         let sendID = self.nextSendID
         self.nextSendID += 1
@@ -165,13 +179,20 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
 
         switch state {
         case .ready:
+            self.isWaitingForPath = false
             self.scheduleReceive()
         case .failed(let error):
             self.finish(throwing: error)
         case .cancelled:
             self.finish(throwing: nil)
-        case .setup, .waiting, .preparing:
-            break
+        case .waiting:
+            // Unpark any sends already enqueued before the path went down; their
+            // completions may never fire while waiting. A completion that fires
+            // later anyway finds no pending continuation and is a no-op.
+            self.isWaitingForPath = true
+            self.failPendingSends(throwing: MoshDatagramTransportError.notConnected)
+        case .setup, .preparing:
+            self.isWaitingForPath = false
         @unknown default:
             break
         }
@@ -247,6 +268,10 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
 
     private func cancelSend(_ sendID: UInt64) {
         guard let continuation = self.pendingSends.removeValue(forKey: sendID) else {
+            // A stale sendID can land here if `failPendingSends` already resumed
+            // this parked send before its cancellation ran; the tombstone is then
+            // never consumed. This is bounded per link lifetime and cleared on
+            // teardown (`resumePendingSends`), so it does not accumulate.
             self.cancelledSendIDs.insert(sendID)
             return
         }
@@ -284,6 +309,18 @@ public actor MoshNWDatagramLink: MoshDatagramLink {
         let continuations = Array(self.pendingSends.values)
         self.pendingSends.removeAll()
         self.cancelledSendIDs.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: error)
+        }
+    }
+
+    /// Fail pending sends WITHOUT clearing `cancelledSendIDs`: unlike terminal
+    /// teardown (`resumePendingSends`), the link keeps running after a
+    /// `.waiting` transition, so a cancellation marker for a send that has not
+    /// reached `storePendingSend` yet must survive or that send would hang.
+    private func failPendingSends(throwing error: Error) {
+        let continuations = Array(self.pendingSends.values)
+        self.pendingSends.removeAll()
         for continuation in continuations {
             continuation.resume(throwing: error)
         }

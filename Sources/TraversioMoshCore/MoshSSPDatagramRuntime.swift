@@ -155,6 +155,7 @@ public actor MoshSSPDatagramRuntime<
     /// that owns the link for the duration; `stop()` is idempotent.
     deinit {
         self.receiveTask?.cancel()
+        self.incomingContinuation.finish()
         self.linkEventContinuation.finish()
         if self.isStopped == false {
             let link = self.link
