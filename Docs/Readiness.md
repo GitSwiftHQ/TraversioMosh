@@ -72,15 +72,65 @@ for server acknowledgement. If the waiting task is cancelled, the caller
 receives `CancellationError` and the session remains running until an explicit
 stop or another failure path.
 
-Transport failures after startup are terminal session failures. Start failure
-after runtime startup, receive-task failure, and user-send failure all stop the
-runtime/link, finish host/render streams with the original error, emit
-`.stopped`, and cause later user operations to fail with `MoshSessionError.stopped`.
+Transport trouble after startup is not automatically terminal. A transient
+`link.send` failure (for example `ENETDOWN`/`EHOSTUNREACH` on a network
+transition, or a link that is momentarily down or rebuilding) is recorded and
+tolerated rather than fatal: the datagram is already accounted as sent by the
+SSP sender, so its retransmit timer re-sends the still-unacknowledged state once
+connectivity returns, and the recorded failure is visible through
+`MoshSessionLiveness.recordedSendErrorDescription`. A faulted link triggers the
+automatic rebuild described under Resilience below. The session tears down only
+on genuinely terminal conditions:
+
+- a receive-side non-packet-local error — a malformed but authenticated
+  instruction (packet-local errors, such as an unauthenticated or truncated
+  datagram or a direction mismatch, are dropped and the receive loop continues);
+- crypto exhaustion — the send-sequence or per-session block-encryption limit is
+  reached;
+- shutdown timeout after `shutdown()`;
+- link-rebuild attempt exhaustion (`MoshSessionError.linkRebuildAttemptsExhausted`);
+- an explicit `stop()`.
+
+On any terminal path the session stops the runtime/link, finishes host/render
+streams (with the originating error where there is one), emits `.stopped`, and
+causes later user operations to fail with `MoshSessionError.stopped`.
+
+When the server initiates shutdown (the SSP shutdown-sentinel state number,
+`UInt64.max`), the session first sends the acknowledgement — an outgoing
+instruction carrying `ack = UInt64.max`, mirroring official Mosh's
+`counterparty_shutdown_ack` so the server can stop retransmitting its final
+state — then emits `.peerShutdown` followed by `.stopped`.
 
 `MoshNWDatagramLink.events` reports Network.framework connection state, path,
 viability, and better-path changes. Host apps may use those events for network
 status UI or logs, but session correctness is driven by authenticated Mosh
 datagrams rather than by path labels.
+
+## Host And Render Operation Streams
+
+`hostOperations` carries raw wire operations decoded from server diffs;
+`renderOperations` carries the display-ready equivalents. A received diff is
+normally forwarded incrementally, but only when it chains from the exact host
+state the streams last rendered.
+
+When a diff does not chain from that state — the server re-based its diff
+against an older reference after a lost acknowledgement — forwarding it would
+double-apply overlapping content. In that case the render stream instead emits a
+single `MoshTerminalRenderOperation.resync(snapshot)`: consumers must replace
+their displayed frame wholesale with the snapshot. `MoshTerminalScreen.apply(.resync)`
+does exactly this, restoring the visible frame from the snapshot. The
+host-operation stream, which carries raw wire operations, emits nothing for a
+re-based diff (official Mosh never forwards wire diffs; its client recomputes
+every frame from the latest framebuffer). Because `hostOperations` emits nothing
+for a re-based diff and carries no resync signal, it is not sufficient for exact
+incremental reconstruction across rebases: consumers needing display fidelity
+must use `renderOperations` (which carries `resync`) or read `screenSnapshot`.
+
+Terminal-generated replies (for example DA/DSR answers to device queries) are
+captured while a diff is applied but are never transmitted. In official Mosh the
+server-side emulator answers such queries; a client that echoed them back would
+inject duplicate bytes on a re-based diff and hand a hostile server a
+keystroke-injection channel.
 
 ## Resilience And Liveness API
 
@@ -92,13 +142,25 @@ attempt is separated by exponential backoff so a genuinely-down network never
 tight-loops:
 
 - `maximumLinkRebuildAttempts`: consecutive rebuild attempts before the session
-  gives up and tears down with the last error. Defaults to `nil`, which retries
-  indefinitely (bounded by backoff), matching Mosh's promise that a session
-  survives arbitrarily long outages. The host application decides when to stop a
-  never-recovering session; by default the package keeps trying.
+  gives up and tears down with `MoshSessionError.linkRebuildAttemptsExhausted`
+  (or the last rebuild failure if one was recorded). An attempt only stops
+  counting as consecutive once the server is actually heard on a rebuilt link —
+  merely installing a fresh socket proves nothing, since `NWConnection.start()`
+  returns before any contact — so a dead network cannot launder the counter
+  through installs that "succeed" and immediately fail again. Defaults to `nil`,
+  which retries indefinitely (bounded by backoff), matching Mosh's promise that
+  a session survives arbitrarily long outages. The host application decides when
+  to stop a never-recovering session; by default the package keeps trying.
 - `initialRebuildBackoffMilliseconds` (default 200) and
   `maximumRebuildBackoffMilliseconds` (default 10000): the backoff schedule,
   doubling each attempt up to the cap.
+- `portHopIntervalMilliseconds` (default 10000, matching official Mosh's
+  `PORT_HOP_INTERVAL`): covers silent transport death — a NAT mapping that
+  expires or a UDP path that blackholes never faults the socket, so an
+  error-driven rebuild can never fire for it. When the server has been silent
+  for at least this long on a link that is itself at least that old, the
+  maintenance loop proactively rebuilds the link (a fresh socket is a fresh
+  source port). `0` disables the time-driven hop.
 - `noContactThresholdMilliseconds` (default 60000, matching official Mosh's
   overlay threshold): when the server has not been heard from for this long, the
   session emits a single informational `.noContact` diagnostic. This never tears
@@ -112,6 +174,10 @@ rendering "last contact Ns ago" and latency, mirroring Mosh's overlay:
 - `millisecondsSinceLastHeard`: elapsed time for direct "Ns ago" rendering.
 - `smoothedRoundTripMilliseconds` / `roundTripVariationMilliseconds`: SRTT and
   its variation. Reading liveness never affects the session.
+- `recordedSendErrorDescription`: a description of the most recent recorded and
+  swallowed `link.send` failure, or `nil` if the last send succeeded. This is
+  the host's immediate signal of an outbound outage, ahead of the slower
+  `.noContact` diagnostic, and mirrors official Mosh's `Connection::send_error`.
 
 ### Diagnostic Events
 
@@ -121,15 +187,23 @@ session correctness does not depend on a consumer draining it. The cases are:
 - `.started(host:port:)`: the session started against this endpoint. It carries
   only the non-secret host and port, never the session key.
 - `.datagramsSent(packetCount:)` and `.hostStateReceived(number:operationCount:)`.
-- `.reconnecting(attempt:)`: the transport failed and the session is rebuilding
-  the link (attempt counts from 1). Recovery is automatic; the session is not
-  torn down while reconnecting.
-- `.reconnected`: a fresh link was installed; unacknowledged state is
-  retransmitted over it.
+  `.datagramsSent` is suppressed for a batch whose sends were all
+  recorded-and-swallowed (transient send tolerance), so it never reads as
+  healthy outbound traffic while sends are failing; the failure is visible via
+  `liveness.recordedSendErrorDescription`.
+- `.reconnecting(attempt:)`: the transport failed (or the port-hop interval
+  elapsed) and the session is rebuilding the link (attempt counts from 1).
+  Recovery is automatic; the session is not torn down while reconnecting.
+- `.reconnected`: the server was actually heard from again on a rebuilt link.
+  It is deliberately NOT emitted when a fresh link is merely installed — a
+  socket that opens against a dead network proves nothing — so this event means
+  real recovery, mirroring official Mosh crediting `last_roundtrip_success`.
 - `.noContact(millisecondsSinceLastHeard:)`: the no-contact threshold was
   crossed. Emitted once per outage; informational only.
-- `.peerShutdown`: the server initiated shutdown; the session then finishes its
-  streams cleanly. Distinct from `.stopped`, the generic terminal event.
+- `.peerShutdown`: the server initiated shutdown. The session sends the
+  acknowledgement (`ack = UInt64.max`) before stopping, then emits this event
+  and finishes its streams cleanly. Distinct from `.stopped`, the generic
+  terminal event.
 - `.stopped`: terminal event for any stop path.
 
 ## Transport And Datagram Sizing
@@ -147,8 +221,12 @@ host app has a proven reason.
 interpolation cannot leak key material. Call `MoshSessionKey.wipe()` when the
 host application is done with the key to zero the underlying bytes; the shared
 key buffer is also zeroed when its last reference is released. The crypto layer
-enforces a session-lifetime block limit. Note that a cipher's derived key
-schedule is a separate copy and is not zeroed by `wipe()`.
+enforces a session-lifetime block limit. The cipher's own key material — the raw
+AES-128 key plus the derived OCB L table — lives in a single shared, wipeable
+buffer and is zeroed (`memset_s`) when the last reference to the cipher chain
+deallocates, matching official Mosh's `ae_clear`. One honest limitation remains:
+CommonCrypto expands and releases its own AES key schedule inside each `CCCrypt`
+call, and that internal copy is outside our control.
 
 ## Host-Application Responsibilities
 

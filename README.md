@@ -99,8 +99,12 @@ await session.stop()
 - Keep the public API narrow and data-plane focused.
 - Match official Mosh behavior for UDP transport, SSP state, packet crypto,
   wire messages, terminal synchronization, and client input translation.
-- Validate cryptography with RFC vectors and Mosh-compatible fixtures.
-- Validate protocol and terminal behavior against real `mosh-server` fixtures.
+- Validate cryptography with RFC 7253 OCB vectors and official wire
+  known-answer vectors.
+- Validate protocol and terminal behavior with deterministic unit and
+  adversarial-network suites in this repository. Interoperability with a real
+  `mosh-server` is validated separately in an external live harness and is not
+  reproducible from this repository alone.
 - Keep SSH bootstrap, host-key trust, UI rendering, and application lifecycle
   policy outside the core package boundary.
 
