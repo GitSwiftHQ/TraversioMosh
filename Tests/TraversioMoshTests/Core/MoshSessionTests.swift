@@ -929,6 +929,110 @@ struct MoshSessionTests {
         await fixture.serverRuntime.stop()
     }
 
+    // A `stop()` that interleaves with an in-flight `start()` must not be
+    // silently ignored: before this fix, `start()` re-checked nothing after its
+    // suspension points, so a `stop()` that ran while `self.runtime` was still
+    // nil (and so completed as a no-op against the runtime being built)
+    // let the resuming `start()` unconditionally commit a runtime that could
+    // then never be stopped again, because `isStopped` was already
+    // (permanently) true and every later `stop()` call short-circuits on it.
+    @Test
+    func concurrentStopDuringStartFailsStartAndStopsTheOrphanedRuntime() async throws {
+        let link = RecoverableSendDatagramLink(initiallyFailing: false, sendError: .notConnected)
+        let factory = SequencedGatedTransportFactory(links: [link], gatingCallIndex: 0)
+        let sessionKey = try MoshSessionKey(rawBytes: sessionKeyBytes)
+        let endpoint = MoshEndpoint(host: "localhost", port: 60_001, sessionKey: sessionKey)
+        let dimensions = try MoshTerminalDimensions(columns: 80, rows: 24)
+        let session = MoshSession(
+            configuration: MoshSessionConfiguration(
+                endpoint: endpoint,
+                initialTerminalDimensions: dimensions,
+                transportFactory: factory,
+                clock: ManualMillisecondsClock(),
+                timer: ManualSessionTimer()
+            )
+        )
+
+        let startTask = Task {
+            try await session.start()
+        }
+
+        try await withSessionTimeout {
+            await factory.waitUntilGatedCallEntered()
+        }
+
+        // `self.runtime` is still nil here: the suspended `start()` has not
+        // committed yet, so — without the fix — this `stop()` is a true no-op
+        // against the runtime the suspended `start()` is building.
+        await session.stop()
+
+        await factory.openGate()
+
+        await expectSessionError(.stopped) {
+            try await startTask.value
+        }
+
+        // The orphaned runtime's link must have been stopped by `start()`
+        // itself once it detected the race, not left running forever.
+        #expect(await link.stopCount() == 1)
+
+        // A second `stop()` remains a clean, idempotent no-op.
+        await session.stop()
+        #expect(await link.stopCount() == 1)
+    }
+
+    // A second concurrent `start()` must not let two runtimes race to become
+    // `self.runtime`: the loser must detect it was superseded, stop the
+    // runtime it built, and leave the winner's session state untouched.
+    @Test
+    func secondConcurrentStartSupersedesFirstAndStopsItsOrphanedRuntime() async throws {
+        let firstLink = RecoverableSendDatagramLink(initiallyFailing: false, sendError: .notConnected)
+        let secondLink = RecoverableSendDatagramLink(initiallyFailing: false, sendError: .notConnected)
+        let factory = SequencedGatedTransportFactory(
+            links: [firstLink, secondLink],
+            gatingCallIndex: 0
+        )
+        let sessionKey = try MoshSessionKey(rawBytes: sessionKeyBytes)
+        let endpoint = MoshEndpoint(host: "localhost", port: 60_001, sessionKey: sessionKey)
+        let dimensions = try MoshTerminalDimensions(columns: 80, rows: 24)
+        let session = MoshSession(
+            configuration: MoshSessionConfiguration(
+                endpoint: endpoint,
+                initialTerminalDimensions: dimensions,
+                transportFactory: factory,
+                clock: ManualMillisecondsClock(),
+                timer: ManualSessionTimer()
+            )
+        )
+
+        let firstStartTask = Task {
+            try await session.start()
+        }
+
+        try await withSessionTimeout {
+            await factory.waitUntilGatedCallEntered()
+        }
+
+        // The second call's `makeDatagramLink` is not the gated one, so it
+        // proceeds uninterrupted and wins the race.
+        try await session.start()
+
+        await factory.openGate()
+
+        await expectSessionError(.alreadyStarted) {
+            try await firstStartTask.value
+        }
+
+        // The loser's runtime was stopped by `start()` once it detected the
+        // supersession...
+        #expect(await firstLink.stopCount() == 1)
+        // ...and the winner's session state was left untouched.
+        #expect(await secondLink.stopCount() == 0)
+
+        await session.stop()
+        #expect(await secondLink.stopCount() == 1)
+    }
+
     // Behavior B: a transient `link.send` failure at start (here every send fails
     // until connectivity returns) must NOT tear the session down, and while the
     // outage lasts the session must NOT falsely claim `.datagramsSent` — the outage
@@ -2739,6 +2843,57 @@ private actor ReconnectingTransportFactory: MoshSessionTransportFactory {
             throw MoshDatagramTransportError.notConnected
         }
         return self.links.removeFirst()
+    }
+}
+
+/// Vends `links` in order, one per `makeDatagramLink` call. The call at
+/// `gatingCallIndex` (0-based) suspends until the test calls `openGate()`, so a
+/// test can deterministically pause one `start()` attempt mid-flight while
+/// driving another call (a concurrent `start()` or `stop()`) to completion,
+/// without a wall-clock sleep.
+private actor SequencedGatedTransportFactory: MoshSessionTransportFactory {
+    private let links: [any MoshDatagramLink]
+    private let gatingCallIndex: Int
+    private var callCount = 0
+    private var hasEnteredGatedCall = false
+    private var enteredContinuation: CheckedContinuation<Void, Never>?
+    private var canProceed = false
+    private var proceedContinuation: CheckedContinuation<Void, Never>?
+
+    init(links: [any MoshDatagramLink], gatingCallIndex: Int) {
+        self.links = links
+        self.gatingCallIndex = gatingCallIndex
+    }
+
+    func makeDatagramLink(for endpoint: MoshEndpoint) async throws -> any MoshDatagramLink {
+        let myCallIndex = self.callCount
+        self.callCount += 1
+        if myCallIndex == self.gatingCallIndex {
+            self.hasEnteredGatedCall = true
+            self.enteredContinuation?.resume()
+            self.enteredContinuation = nil
+            if self.canProceed == false {
+                await withCheckedContinuation { continuation in
+                    self.proceedContinuation = continuation
+                }
+            }
+        }
+        return self.links[myCallIndex]
+    }
+
+    func waitUntilGatedCallEntered() async {
+        if self.hasEnteredGatedCall {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            self.enteredContinuation = continuation
+        }
+    }
+
+    func openGate() {
+        self.canProceed = true
+        self.proceedContinuation?.resume()
+        self.proceedContinuation = nil
     }
 }
 

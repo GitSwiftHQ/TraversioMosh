@@ -266,6 +266,11 @@ public actor MoshSession {
     private var nextStopWaiterID: UInt64 = 0
     private var stopWaiters: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var cancelledStopWaiterIDs: Set<UInt64> = []
+    /// Distinguishes concurrent `start()` attempts. Bumped at the top of every
+    /// `start()` call, before its first suspension point, so an attempt that
+    /// resumes from an await can tell whether a later `start()` call has since
+    /// become the current one and must not overwrite that attempt's state.
+    private var startGeneration: UInt64 = 0
     private var isStarted = false
     private var isStopped = false
 
@@ -357,6 +362,9 @@ public actor MoshSession {
             throw MoshSessionError.alreadyStarted
         }
 
+        self.startGeneration &+= 1
+        let myStartGeneration = self.startGeneration
+
         let link = try await self.configuration.transportFactory.makeDatagramLink(
             for: self.configuration.endpoint
         )
@@ -389,26 +397,67 @@ public actor MoshSession {
             await runtime.modifyCurrentState { state in
                 state.append(.resize(initialDimensions))
             }
+        } catch {
+            // Not committed to `self` yet, so a concurrent `stop()` cannot have
+            // reached this runtime (it saw `self.runtime == nil`) and a
+            // concurrent WINNING `start()` must not be torn down by our
+            // failure. Only run the shared failure cleanup when neither raced
+            // us; otherwise just stop the runtime this attempt created.
+            if self.startGeneration == myStartGeneration, self.isStopped == false {
+                await self.finishFromStartFailure(runtime: runtime, throwing: error)
+            } else {
+                await runtime.stop()
+            }
+            throw error
+        }
 
-            self.runtime = runtime
-            self.isStarted = true
-            self.startedAtMilliseconds = initialNowMilliseconds
-            self.lastLinkInstalledAtMilliseconds = initialNowMilliseconds
-            self.hasEmittedNoContact = false
-            self.startReceiveTask(runtime: runtime)
-            self.startLinkEventTask(runtime: runtime)
-            self.diagnosticEventContinuation.yield(
-                .started(
-                    host: self.configuration.endpoint.host,
-                    port: self.configuration.endpoint.port
-                )
+        // Re-validate after every suspension above: while this attempt was
+        // suspended, a concurrent `stop()` may have run to completion (it saw
+        // `self.runtime == nil` and so could not reach this runtime), or a
+        // second concurrent `start()` may have claimed a newer
+        // `startGeneration` and already committed. Committing unconditionally
+        // here is exactly the reentrancy race that let a "stopped" session
+        // silently come back with a live, uncancellable runtime, or let a
+        // superseded attempt overwrite the winner's state.
+        guard self.startGeneration == myStartGeneration else {
+            await runtime.stop()
+            throw MoshSessionError.alreadyStarted
+        }
+        guard self.isStopped == false else {
+            await runtime.stop()
+            throw MoshSessionError.stopped
+        }
+
+        self.runtime = runtime
+        self.isStarted = true
+        self.startedAtMilliseconds = initialNowMilliseconds
+        self.lastLinkInstalledAtMilliseconds = initialNowMilliseconds
+        self.hasEmittedNoContact = false
+        self.startReceiveTask(runtime: runtime)
+        self.startLinkEventTask(runtime: runtime)
+        self.diagnosticEventContinuation.yield(
+            .started(
+                host: self.configuration.endpoint.host,
+                port: self.configuration.endpoint.port
             )
+        )
+
+        do {
             _ = try await self.sendDueDatagrams()
-            self.restartMaintenanceTask(runtime: runtime)
         } catch {
             await self.finishFromStartFailure(runtime: runtime, throwing: error)
             throw error
         }
+
+        // A second `start()` can no longer win from here on: `isStarted` is
+        // already true, so any concurrent call is rejected at the top of this
+        // method before it can touch `startGeneration`. Only a genuine
+        // stop-like transition can invalidate this attempt now, and every one
+        // of those stops `self.runtime` itself before setting `isStopped`.
+        guard self.isStopped == false else {
+            return
+        }
+        self.restartMaintenanceTask(runtime: runtime)
     }
 
     public func stop() async {
