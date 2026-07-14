@@ -658,11 +658,34 @@ public actor MoshSession {
             operations = self.terminalEngine.acceptHostState(state.state)
             self.terminalScreen = state.state.terminalScreen
             if chainsFromAdoptedState {
+                // `renderOperations` defaults to a bounded `.bufferingNewest`
+                // policy: once full, a yield still succeeds for the value just
+                // passed in, but silently evicts an earlier, not-yet-consumed
+                // operation to make room, reported back as `.dropped`. An
+                // incremental consumer that missed an evicted operation is left
+                // permanently out of sync with every later chained diff unless
+                // told to resync. Observe that signal and, on the first drop in
+                // this batch, stop trying more granular operations (`terminalScreen`
+                // already reflects the final adopted state regardless of how many
+                // of this batch's operations were attempted) and fall back to a
+                // wholesale resync — the same repair already used for a re-based
+                // diff below. `hostOperations` has no resync concept and is
+                // unaffected: it keeps receiving every operation in this batch.
+                var renderStreamOutOfSync = false
                 for operation in operations {
                     self.hostOperationContinuation.yield(operation)
-                    if let renderOperation = MoshTerminalRenderOperation(operation) {
-                        self.renderOperationContinuation.yield(renderOperation)
+                    guard renderStreamOutOfSync == false,
+                          let renderOperation = MoshTerminalRenderOperation(operation) else {
+                        continue
                     }
+                    if case .dropped = self.renderOperationContinuation.yield(renderOperation) {
+                        renderStreamOutOfSync = true
+                    }
+                }
+                if renderStreamOutOfSync {
+                    self.renderOperationContinuation.yield(
+                        .resync(self.terminalScreen.snapshot)
+                    )
                 }
             } else {
                 self.renderOperationContinuation.yield(

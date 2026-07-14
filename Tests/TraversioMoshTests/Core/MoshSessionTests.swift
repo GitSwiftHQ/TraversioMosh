@@ -2520,6 +2520,83 @@ struct MoshSessionTests {
         }
     }
 
+    // Once the bounded `renderOperations` buffer is full, a further yield
+    // still succeeds for the value just passed in but silently evicts an
+    // earlier, not-yet-consumed operation (reported as `.dropped`). Without a
+    // resync, an incremental consumer that missed the evicted operation is
+    // permanently out of sync with every later chained diff. This proves the
+    // session detects the drop and repairs the consumer with a `.resync`
+    // carrying the fully correct final state, the same repair already used
+    // for a re-based diff above.
+    @Test
+    func renderStreamOverflowEmitsResyncInsteadOfSilentlyDroppingOperations() async throws {
+        let fixture = try await makeSessionFixture(
+            columns: 80,
+            rows: 24,
+            renderOperationBufferingPolicy: .bufferingNewest(1)
+        )
+        // Recorded via `diagnosticEvents`, not `renderOperations`: an eagerly
+        // awaiting `renderOperations` consumer would receive each yielded
+        // operation directly (AsyncStream bypasses buffering entirely when a
+        // consumer is already suspended in `next()`), so this test must not
+        // start reading `renderOperations` until after the drop-triggering
+        // yields already happened with nobody consuming them.
+        let (recorder, recorderTask) = recordEvents(from: fixture.session)
+        var state = MoshTerminalHostState()
+        state.append(.write(MoshTerminalOutput(bytes: Array("A".utf8))))
+        state.append(.write(MoshTerminalOutput(bytes: Array("B".utf8))))
+        let expectedSnapshot = state.screenSnapshot
+
+        do {
+            try await fixture.serverRuntime.start()
+            try await fixture.session.start()
+
+            // A single instruction carrying two operations: with a
+            // one-element render buffer, the second `renderOperations` yield
+            // evicts the first (unconsumed) operation before this test ever
+            // reads the stream.
+            await fixture.serverRuntime.setCurrentState(state)
+            _ = try await fixture.serverRuntime.sendDueDatagrams()
+
+            // `.hostStateReceived` is emitted only after the render loop (and
+            // any drop-triggered resync) has already run to completion.
+            try await withSessionTimeout {
+                await recorder.waitUntil { events in
+                    events.contains { event in
+                        if case .hostStateReceived = event { return true }
+                        return false
+                    }
+                }
+            }
+
+            let renderOperations = try await withSessionTimeout {
+                var iterator = fixture.session.renderOperations.makeAsyncIterator()
+                guard let first = try await iterator.next() else {
+                    return [MoshTerminalRenderOperation]()
+                }
+                return [first]
+            }
+
+            // The evicted write("A") is gone for good; a resync carrying the
+            // correct A+B state is what actually survives in the buffer, not
+            // a stale or missing frame.
+            guard renderOperations.count == 1, case .resync(let snapshot) = renderOperations[0] else {
+                Issue.record("Expected a .resync after the overflow drop; got \(renderOperations).")
+                throw SessionTestError.timedOut
+            }
+            #expect(snapshot == expectedSnapshot)
+
+            recorderTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+        } catch {
+            recorderTask.cancel()
+            await fixture.session.stop()
+            await fixture.serverRuntime.stop()
+            throw error
+        }
+    }
+
     // Behavior C under re-base: a DSR query applied both by a chained diff and again
     // by a re-based diff that re-includes it must produce ZERO transmitted reply
     // bytes both times — the server-side emulator answers such queries; the client
@@ -3200,7 +3277,8 @@ private func makeSessionFixture(
         shutdownMaximumAttempts: 16
     ),
     predictionConfiguration: MoshPredictionConfiguration = MoshPredictionConfiguration(),
-    resilience: MoshSessionResilienceConfiguration = MoshSessionResilienceConfiguration()
+    resilience: MoshSessionResilienceConfiguration = MoshSessionResilienceConfiguration(),
+    renderOperationBufferingPolicy: MoshSession.RenderOperationStream.Continuation.BufferingPolicy = .bufferingNewest(512)
 ) async throws -> MoshSessionFixture {
     let pair = await MoshInMemoryDatagramLink.connectedPair()
     let clock = ManualMillisecondsClock()
@@ -3219,7 +3297,8 @@ private func makeSessionFixture(
             chaffSource: .none,
             predictionConfiguration: predictionConfiguration,
             resilience: resilience
-        )
+        ),
+        renderOperationBufferingPolicy: renderOperationBufferingPolicy
     )
     let serverRuntime = try makeServerRuntime(
         link: pair.server,
