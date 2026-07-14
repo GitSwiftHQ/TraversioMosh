@@ -197,6 +197,19 @@ public struct MoshFragmentAssembly: Sendable {
 
         self.finalFragmentNumber = nil
         self.fragments.removeAll(keepingCapacity: true)
+        // `currentInstructionID` is intentionally left set: an ordinary SSP
+        // retransmission of this same instruction (its ACK was lost) reuses
+        // the same instruction ID (`MoshFragmenter.makeFragments` reuses
+        // `nextInstructionID` for an unchanged identity), so it must not be
+        // treated as a fresh instruction. But the byte budget MUST reset here
+        // alongside `fragments`/`finalFragmentNumber`: without this, a
+        // retransmitted fragment is no longer a tracked duplicate (its
+        // `fragments` entry was just cleared) and re-adds its bytes on top of
+        // the already-completed total, so a long enough run of ordinary
+        // retransmissions — ACK loss alone, no adversarial peer required —
+        // would eventually cross `maximumCumulativeCompressedByteCount` and
+        // fatally tear down an otherwise healthy session.
+        self.cumulativeContentByteCount = 0
 
         return instruction
     }

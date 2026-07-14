@@ -282,6 +282,49 @@ struct MoshFragmentationTests {
         )
         _ = try assembly.add(next)
     }
+
+    // A successful completion resets `fragments`/`finalFragmentNumber` but,
+    // before this fix, left the cumulative byte budget unreset. An ordinary
+    // SSP retransmission of the SAME instruction ID (its ACK was lost, so the
+    // sender resends unchanged — `MoshFragmenter` reuses `nextInstructionID`
+    // for an unchanged identity, see `retransmissionReusesInstructionID`
+    // above) is not requiring any adversarial peer, yet would add its bytes on
+    // top of the already-completed total and eventually exceed the budget on
+    // nothing but ordinary retransmission.
+    @Test
+    func assemblyResetsCumulativeContentByteCountAfterSuccessfulCompletion() throws {
+        let compressor = MoshCompressor()
+        var assembly = MoshFragmentAssembly(compressor: compressor)
+        let instruction = sampleInstruction(diff: Array(repeating: 0xaa, count: 64))
+        let compressedPayload = try compressor.compress(instruction.serializedBytes())
+        let completingFragment = try MoshFragment(
+            instructionID: 9,
+            fragmentNumber: 0,
+            isFinal: true,
+            contents: compressedPayload
+        )
+
+        // First delivery completes successfully.
+        let firstResult = try assembly.add(completingFragment)
+        #expect(firstResult == instruction)
+
+        // A retransmission of the SAME (unchanged) instruction ID must not be
+        // charged against a stale leftover total from the completed delivery
+        // above. Sized so a buggy (unreset) cumulative total would land
+        // exactly one byte past the budget, while a correctly-reset total
+        // stays one byte under it.
+        let nearBudgetContent = Array(
+            repeating: UInt8(0xee),
+            count: MoshFragmentAssembly.maximumCumulativeCompressedByteCount - compressedPayload.count + 1
+        )
+        let retransmittedFragment = try MoshFragment(
+            instructionID: 9,
+            fragmentNumber: 5,
+            isFinal: false,
+            contents: nearBudgetContent
+        )
+        _ = try assembly.add(retransmittedFragment)
+    }
 }
 
 private func sampleInstruction(
