@@ -5,12 +5,13 @@ Licensed under the MIT License.
 See LICENSE for details.
 -->
 
-# TraversioMosh Readiness
+# Sessions and Resilience
 
-This document records the current package-level handoff for host applications
-that want to embed TraversioMosh.
+This guide describes the `MoshSession` lifecycle, rendering contract, transport
+recovery, liveness reporting, and the responsibilities retained by the host
+application.
 
-## Supported Package Boundary
+## Host Application Boundary
 
 TraversioMosh owns the Mosh data plane:
 
@@ -21,8 +22,7 @@ TraversioMosh owns the Mosh data plane:
 - UDP datagram transport over Network.framework or an injected transport
 - public `MoshSession` lifecycle, input, resize, shutdown, snapshots, and
   diagnostic events
-- terminal host/render operation streams and the internal renderer-ready screen
-  projection
+- terminal host/render operation streams and a renderer-ready screen projection
 
 Host applications own everything outside the data plane:
 
@@ -284,32 +284,7 @@ Beyond the data-plane boundary above, the host application must own:
 - UI layout, terminal view rendering, scrollback, tabs, windows, and settings.
 - Persistence, telemetry, and application lifecycle policy.
 
-## Current Validation
-
-The in-repo test suite is deterministic and fixture-based. It covers crypto
-vectors and the session-lifetime block limit, packet wire formats, protobuf2
-messages, compression and the bounded inflate ceiling, fragmentation, SSP
-sender/receiver behavior, out-of-order and heartbeat-gated receive,
-server-initiated-shutdown detection, datagram sequencing, terminal
-parser/framebuffer behavior, local prediction, session lifecycle, transport
-boundaries, shutdown, cancellation, key wiping and redaction, and public stream
-failure semantics. A deterministic adversarial-network suite additionally
-exercises loss, reorder, duplication, transient send errors, link death with
-crypto-preserving rebuild, and long-session memory behavior.
-
-Interoperability with real `mosh-server` is validated separately, outside this
-repository, in a live validation harness that runs the package against real
-server targets across multiple Linux distributions and a source-built current
-Mosh, covering baseline output, user input, resize, maintenance sends, malformed
-datagrams, packet loss, roaming, terminal queries, and full-screen workloads
-such as `less`, `nano`, `tmux`, and `top`. That live coverage is not reproducible
-from this repository alone.
-
-## Integration Status
-
-The package provides a hardened Mosh client data plane with strong in-repo
-deterministic and adversarial-network coverage, and is ready to embed through
-`MoshSession` and the documented bootstrap, transport, resilience, and liveness
-boundaries. The host-application responsibilities listed above remain the
-embedding app's to own. If host-app integration exposes a TraversioMosh defect,
-fix it in this package with focused regression coverage.
+For a physical-device checklist against an Ubuntu server, see
+[Live Testing](live-testing.md). Security properties and reporting guidance are
+covered in [Security](security.md) and the repository's
+[`SECURITY.md`](../SECURITY.md).

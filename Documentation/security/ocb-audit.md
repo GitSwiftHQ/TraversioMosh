@@ -1,3 +1,10 @@
+<!--
+Copyright (c) 2026 GitSwift LLC
+
+Licensed under the MIT License.
+See LICENSE for details.
+-->
+
 # OCB Audit Checklist
 
 TraversioMosh implements the Mosh data-plane AEAD as AES-128-OCB with a
@@ -68,5 +75,6 @@ AES-128 keys, 1...15 byte RFC 7253 nonces, and 16-byte tags.
   validated extensively across multiple Linux distributions and a
   source-built current-Mosh target, covering baseline traffic, packet loss,
   roaming, malformed datagrams, and full-screen workloads. That live
-  coverage runs outside this repository and is not reproducible from the
-  package alone; see `Docs/Readiness.md`.
+  coverage runs outside this repository. See [Release Notes](../release-notes.md)
+  for the release validation summary and [Live Testing](../live-testing.md) for
+  a reproducible physical-device checklist.
