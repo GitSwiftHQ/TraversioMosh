@@ -368,6 +368,60 @@ struct MoshSSPDatagramRuntimeTests {
         }
     }
 
+    // A `stop()` that interleaves with an in-flight `replaceLink()` must not be
+    // silently ignored: before this fix, `replaceLink()` re-checked nothing
+    // after awaiting the old link's `stop()`, so a `stop()` that raced in during
+    // that suspension (and so also targeted the SAME old link, since `self.link`
+    // had not yet been reassigned) let the resuming `replaceLink()` install and
+    // start a brand-new link on a runtime already marked stopped — a link whose
+    // `stop()` this runtime would then never call again.
+    @Test
+    func concurrentStopDuringReplaceLinkFailsReplaceAndStopsTheNewLink() async throws {
+        let oldLink = GatedStopDatagramLink()
+        let newLink = StopSpyDatagramLink()
+        let runtime = try makeRuntime(
+            link: oldLink,
+            clock: ManualMillisecondsClock(),
+            sendDirection: .toServer,
+            receiveDirection: .toClient
+        )
+        try await runtime.start()
+
+        let replaceTask = Task {
+            try await runtime.replaceLink(newLink)
+        }
+
+        // Wait for `replaceLink`'s own `await self.link.stop()` to be in flight.
+        try await withRuntimeTimeout {
+            while await oldLink.stopCount() < 1 {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+        }
+
+        // `self.link` has not been reassigned yet, so this targets the SAME old
+        // (gated) link and also suspends on its gate.
+        let stopTask = Task {
+            await runtime.stop()
+        }
+
+        try await withRuntimeTimeout {
+            while await oldLink.stopCount() < 2 {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+        }
+
+        await oldLink.openGate()
+        await stopTask.value
+
+        await #expect(throws: MoshSSPDatagramRuntimeError.stopped) {
+            try await replaceTask.value
+        }
+
+        // The new link must have been stopped by `replaceLink` once it detected
+        // the race, not left running with nothing left to reach it again.
+        #expect(await newLink.stopCount() == 1)
+    }
+
     // Defect A: a transient `link.send` failure must be recorded (not thrown) and
     // must not tear the runtime down; the SSP retransmit timer then re-delivers the
     // still-unacknowledged state once the link recovers.
@@ -812,6 +866,64 @@ private actor IntermittentForwardingLink: MoshDatagramLink {
 
     func stop() async {
         await self.inner.stop()
+    }
+}
+
+/// A link whose `stop()` calls suspend until the test opens the gate, so a test
+/// can deterministically pause `replaceLink`'s old-link teardown mid-flight
+/// while a concurrent `stop()` call races in against the same old link. Every
+/// concurrent `stop()` call queues on the same gate and is released together,
+/// matching the real runtime's actor-reentrancy semantics. Records how many
+/// times `stop()` was entered.
+private actor GatedStopDatagramLink: MoshDatagramLink {
+    nonisolated let incomingDatagrams: MoshDatagramStream
+
+    private let continuation: MoshDatagramStream.Continuation
+    private var stopCountStorage = 0
+    private var canProceed = false
+    private var proceedContinuations: [CheckedContinuation<Void, Never>] = []
+
+    init() {
+        var capturedContinuation: MoshDatagramStream.Continuation?
+        self.incomingDatagrams = MoshDatagramStream(
+            bufferingPolicy: .bufferingNewest(1)
+        ) { continuation in
+            capturedContinuation = continuation
+        }
+
+        guard let capturedContinuation else {
+            preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+        self.continuation = capturedContinuation
+    }
+
+    func start() async throws {}
+
+    func send(_ datagram: [UInt8]) async throws {
+        _ = datagram
+    }
+
+    func stop() async {
+        self.stopCountStorage += 1
+        if self.canProceed == false {
+            await withCheckedContinuation { continuation in
+                self.proceedContinuations.append(continuation)
+            }
+        }
+        self.continuation.finish()
+    }
+
+    func stopCount() -> Int {
+        self.stopCountStorage
+    }
+
+    func openGate() {
+        self.canProceed = true
+        let waiters = self.proceedContinuations
+        self.proceedContinuations.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 }
 

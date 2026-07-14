@@ -198,13 +198,31 @@ public actor MoshSSPDatagramRuntime<
         try self.requireStarted()
 
         self.receiveGeneration &+= 1
+        let myReceiveGeneration = self.receiveGeneration
         self.receiveTask?.cancel()
         self.receiveTask = nil
         await self.link.stop()
 
+        // A concurrent `stop()` (which sees `self.link` as the same old link
+        // this call just awaited stopping) or another `replaceLink` call may
+        // have already run to completion while this call was suspended above.
+        // Installing and starting `newLink` unconditionally here is exactly the
+        // reentrancy race that could install and start a link after the
+        // runtime was already marked stopped — a link `stop()`'s own guard
+        // then skips, and whose receive task nothing but `deinit` ever cancels.
+        guard self.isStopped == false, self.receiveGeneration == myReceiveGeneration else {
+            await newLink.stop()
+            throw MoshSSPDatagramRuntimeError.stopped
+        }
+
         self.link = newLink
         self.recordedSendErrorDescription = nil
         try await newLink.start()
+
+        guard self.isStopped == false, self.receiveGeneration == myReceiveGeneration else {
+            await newLink.stop()
+            throw MoshSSPDatagramRuntimeError.stopped
+        }
         self.startReceiveTask()
     }
 
