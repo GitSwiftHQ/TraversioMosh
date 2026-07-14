@@ -249,6 +249,49 @@ struct MoshDatagramLinkTests {
             throw error
         }
     }
+
+#if os(macOS)
+    @Test(.timeLimit(.minutes(1)))
+    func nwLinkPublishesWaitingAndFailsSendsWhenRequiredInterfaceIsUnavailable() async throws {
+        let parameters = NWParameters.udp
+        // macOS has no cellular network interface. Requiring one drives the
+        // real NWConnection through its no-viable-path state without changing
+        // the host's routes, Wi-Fi, VPN, packet filter, or user-owned network.
+        parameters.requiredInterfaceType = .cellular
+        let link = MoshNWDatagramLink(
+            endpoint: .hostPort(host: "192.0.2.1", port: 9),
+            parameters: parameters
+        )
+        let waitingEventTask = Task<MoshNWDatagramEvent?, Never> {
+            var iterator = link.events.makeAsyncIterator()
+            while let event = await iterator.next() {
+                if event == .stateChanged(.waiting) {
+                    return event
+                }
+            }
+            return nil
+        }
+
+        do {
+            try await link.start()
+            let event = try await withTimeout(after: .seconds(10)) {
+                await waitingEventTask.value
+            }
+
+            #expect(event == .stateChanged(.waiting))
+            await #expect(throws: MoshDatagramTransportError.notConnected) {
+                try await link.send([0x01])
+            }
+
+            waitingEventTask.cancel()
+            await link.stop()
+        } catch {
+            waitingEventTask.cancel()
+            await link.stop()
+            throw error
+        }
+    }
+#endif
 }
 
 private actor LoopbackUDPEchoServer {

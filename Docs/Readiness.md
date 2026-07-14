@@ -106,6 +106,13 @@ viability, and better-path changes. Host apps may use those events for network
 status UI or logs, but session correctness is driven by authenticated Mosh
 datagrams rather than by path labels.
 
+When Network.framework reports `.waiting` because no viable route exists,
+`MoshNWDatagramLink` fails both pending and subsequent sends with
+`MoshDatagramTransportError.notConnected` instead of leaving a caller suspended
+until the path recovers. This real Network.framework path is covered on macOS by
+requiring an unavailable cellular interface; the test changes no user-owned
+route, interface, VPN, or packet-filter configuration.
+
 ## Host And Render Operation Streams
 
 `hostOperations` carries raw wire operations decoded from server diffs;
@@ -130,7 +137,9 @@ must use `renderOperations` (which carries `resync`) or read `screenSnapshot`.
 `MoshSession.init`'s `renderOperationBufferingCapacity` parameter (default
 512; the type is an `Int` capacity, not a general buffering policy, precisely
 because the repair below only self-heals under `.bufferingNewest`
-semantics). If a slow consumer lets that buffer fill, the session detects the
+semantics). The capacity must be at least one; a non-positive value violates the
+initializer contract and triggers a precondition failure. If a slow consumer
+lets that buffer fill, the session detects the
 resulting dropped operation and emits the same wholesale `.resync(snapshot)`
 used for a re-based diff, rather than silently continuing an incremental
 sequence the consumer never fully received; a full `.bufferingNewest` buffer

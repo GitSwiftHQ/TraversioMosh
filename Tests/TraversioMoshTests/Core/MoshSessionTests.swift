@@ -2699,19 +2699,6 @@ struct MoshSessionTests {
         }
     }
 
-    // Behavior H (`MoshNWDatagramLink` fast-fail while the path is `.waiting`) is not
-    // unit-testable deterministically: the only driver of the `.waiting` transition
-    // is a real `NWConnection`'s `stateUpdateHandler` reporting "no viable route",
-    // which depends on host routing state and cannot be forced without a live network
-    // manipulation (a UDP connection to loopback reports `.ready`, not `.waiting`).
-    // `handleState(_:)`/`isWaitingForPath` are private with no injection seam, so a
-    // deterministic test would require a product-code seam (out of scope). Driving a
-    // real route failure would be environment-dependent and flaky, so this is left
-    // disabled rather than written as a flaky test.
-    @Test(.disabled("MoshNWDatagramLink .waiting has no deterministic seam; requires a real routing failure."))
-    func nwLinkFailsSendsFastWhileWaitingForPath() async throws {
-        Issue.record("Not unit-testable at the current seam; see the disabled-reason.")
-    }
 }
 
 private struct MoshSessionFixture: Sendable {
