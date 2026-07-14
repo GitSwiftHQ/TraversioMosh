@@ -205,6 +205,83 @@ struct MoshFragmentationTests {
             _ = try assembly.add(final)
         }
     }
+
+    // Without a cumulative check, a fragment number bounded to 15 bits bounds
+    // fragment COUNT but not retained bytes: an authenticated peer that never
+    // sends a final fragment can otherwise force unbounded retention.
+    @Test
+    func assemblyRejectsCumulativeContentByteCountBeyondBudget() throws {
+        var assembly = MoshFragmentAssembly()
+        let halfBudget = MoshFragmentAssembly.maximumCumulativeCompressedByteCount / 2
+        let first = try MoshFragment(
+            instructionID: 9,
+            fragmentNumber: 0,
+            isFinal: false,
+            contents: Array(repeating: 0xaa, count: halfBudget + 1)
+        )
+        let second = try MoshFragment(
+            instructionID: 9,
+            fragmentNumber: 1,
+            isFinal: false,
+            contents: Array(repeating: 0xbb, count: halfBudget + 1)
+        )
+
+        _ = try assembly.add(first)
+
+        #expect(
+            throws: MoshFragmentationError.cumulativeContentByteCountExceeded(
+                instructionID: 9,
+                byteCount: 2 * (halfBudget + 1)
+            )
+        ) {
+            _ = try assembly.add(second)
+        }
+    }
+
+    // The budget must not falsely reject a legitimate peer: a single fragment
+    // exactly at the ceiling (matching an instruction that decompresses to at
+    // most the compressor's own maximum) is accepted.
+    @Test
+    func assemblyAcceptsCumulativeContentByteCountAtExactBudget() throws {
+        var assembly = MoshFragmentAssembly()
+        let content = Array(
+            repeating: UInt8(0xcc),
+            count: MoshFragmentAssembly.maximumCumulativeCompressedByteCount
+        )
+        let fragment = try MoshFragment(
+            instructionID: 9,
+            fragmentNumber: 0,
+            isFinal: false,
+            contents: content
+        )
+
+        _ = try assembly.add(fragment)
+    }
+
+    // A fresh instruction ID must start a fresh budget rather than inheriting
+    // the previous (possibly abandoned) instruction's cumulative byte count.
+    @Test
+    func assemblyResetsCumulativeContentByteCountOnNewInstructionID() throws {
+        var assembly = MoshFragmentAssembly()
+        let large = try MoshFragment(
+            instructionID: 9,
+            fragmentNumber: 0,
+            isFinal: false,
+            contents: Array(
+                repeating: 0xaa,
+                count: MoshFragmentAssembly.maximumCumulativeCompressedByteCount
+            )
+        )
+        _ = try assembly.add(large)
+
+        let next = try MoshFragment(
+            instructionID: 10,
+            fragmentNumber: 0,
+            isFinal: false,
+            contents: [0x01]
+        )
+        _ = try assembly.add(next)
+    }
 }
 
 private func sampleInstruction(

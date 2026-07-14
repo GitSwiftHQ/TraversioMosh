@@ -10,6 +10,7 @@ public enum MoshFragmentationError: Error, Equatable, Sendable {
     case fragmentCountOutOfRange(Int)
     case conflictingDuplicateFragment(instructionID: UInt64, fragmentNumber: UInt16)
     case fragmentBeyondFinal(instructionID: UInt64, fragmentNumber: UInt16, finalFragmentNumber: UInt16)
+    case cumulativeContentByteCountExceeded(instructionID: UInt64, byteCount: Int)
 }
 
 public struct MoshFragmenter: Sendable {
@@ -84,16 +85,42 @@ public struct MoshFragmenter: Sendable {
 }
 
 public struct MoshFragmentAssembly: Sendable {
+    /// Upper bound on the cumulative COMPRESSED byte count `add(_:)` retains for
+    /// a single in-flight instruction, checked before every new fragment is
+    /// stored — not only after the final fragment arrives and the fragments are
+    /// concatenated for decompression. Without this, a fragment number bounded
+    /// to 15 bits (`MoshFragment.maxFragmentNumber`) bounds fragment COUNT but
+    /// not cumulative bytes, so an authenticated peer that withholds the final
+    /// fragment can force retention of up to 32,768 near-UDP-sized fragments
+    /// (~2 GiB) before the existing decompressed-output ceiling ever runs.
+    ///
+    /// zlib's compressed output can exceed its input size by a small, bounded
+    /// margin for incompressible data — the same worst case `compressBound`
+    /// accounts for: `sourceLength + (sourceLength >> 12) + (sourceLength >> 14)
+    /// + (sourceLength >> 25) + 13`. Using that margin above
+    /// `MoshCompressor.defaultMaximumOutputByteCount`, rather than the bare
+    /// decompressed ceiling, means a legitimate peer whose instruction
+    /// decompresses to at most that ceiling can never be rejected here no
+    /// matter how incompressible its content is; only a peer that keeps
+    /// exceeding it while withholding the final fragment is charged with
+    /// resource exhaustion.
+    public static let maximumCumulativeCompressedByteCount: Int = {
+        let sourceLength = MoshCompressor.defaultMaximumOutputByteCount
+        return sourceLength + (sourceLength >> 12) + (sourceLength >> 14) + (sourceLength >> 25) + 13
+    }()
+
     private let compressor: MoshCompressor
     private var currentInstructionID: UInt64?
     private var finalFragmentNumber: UInt16?
     private var fragments: [UInt16: MoshFragment]
+    private var cumulativeContentByteCount: Int
 
     public init(compressor: MoshCompressor = MoshCompressor()) {
         self.compressor = compressor
         self.currentInstructionID = nil
         self.finalFragmentNumber = nil
         self.fragments = [:]
+        self.cumulativeContentByteCount = 0
     }
 
     public mutating func add(_ fragment: MoshFragment) throws -> MoshTransportInstruction? {
@@ -101,6 +128,7 @@ public struct MoshFragmentAssembly: Sendable {
             self.currentInstructionID = fragment.instructionID
             self.finalFragmentNumber = nil
             self.fragments.removeAll(keepingCapacity: true)
+            self.cumulativeContentByteCount = 0
         }
 
         if let finalFragmentNumber, fragment.fragmentNumber > finalFragmentNumber {
@@ -121,6 +149,14 @@ public struct MoshFragmentAssembly: Sendable {
             return try self.completeInstructionIfReady()
         }
 
+        let projectedByteCount = self.cumulativeContentByteCount + fragment.contents.count
+        guard projectedByteCount <= Self.maximumCumulativeCompressedByteCount else {
+            throw MoshFragmentationError.cumulativeContentByteCountExceeded(
+                instructionID: fragment.instructionID,
+                byteCount: projectedByteCount
+            )
+        }
+
         if fragment.isFinal {
             if let highestFragmentNumber = self.fragments.keys.max(),
                highestFragmentNumber > fragment.fragmentNumber {
@@ -134,6 +170,7 @@ public struct MoshFragmentAssembly: Sendable {
         }
 
         self.fragments[fragment.fragmentNumber] = fragment
+        self.cumulativeContentByteCount = projectedByteCount
         return try self.completeInstructionIfReady()
     }
 
