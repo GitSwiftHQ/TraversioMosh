@@ -282,14 +282,23 @@ public actor MoshSession {
         // detects a full buffer and falls back to a wholesale `.resync`, which
         // only self-heals under `.bufferingNewest` semantics (a full buffer
         // still accepts the newest yield, evicting an older one). A
-        // `.bufferingOldest` or zero-capacity policy would reject new yields
-        // — including the resync itself — once full, silently defeating this
-        // guarantee with no enforcement. Restricting the parameter's type
-        // makes that misconfiguration unrepresentable rather than a silent
-        // runtime footgun.
+        // `.bufferingOldest` policy would reject new yields — including the
+        // resync itself — once full, silently defeating this guarantee with
+        // no enforcement; restricting the parameter's type makes that
+        // misconfiguration unrepresentable. The type alone does not rule out
+        // a non-positive capacity, which `.bufferingNewest` accepts without
+        // trapping but which drops every single yield (the precondition
+        // below turns that into an immediate, loud construction-time failure
+        // instead of a session that silently never renders anything).
         renderOperationBufferingCapacity: Int = 512,
         diagnosticEventBufferingPolicy: DiagnosticEventStream.Continuation.BufferingPolicy = .bufferingNewest(512)
     ) {
+        precondition(
+            renderOperationBufferingCapacity >= 1,
+            "renderOperationBufferingCapacity must be at least 1; a non-positive capacity " +
+                "would drop every render operation, including the backpressure-drop resync repair."
+        )
+
         let hostOperationStream = Self.makeHostOperationStream(bufferingPolicy: hostOperationBufferingPolicy)
         let renderOperationStream = Self.makeRenderOperationStream(
             bufferingPolicy: .bufferingNewest(renderOperationBufferingCapacity)
