@@ -2533,7 +2533,7 @@ struct MoshSessionTests {
         let fixture = try await makeSessionFixture(
             columns: 80,
             rows: 24,
-            renderOperationBufferingPolicy: .bufferingNewest(1)
+            renderOperationBufferingCapacity: 1
         )
         // Recorded via `diagnosticEvents`, not `renderOperations`: an eagerly
         // awaiting `renderOperations` consumer would receive each yielded
@@ -3278,7 +3278,7 @@ private func makeSessionFixture(
     ),
     predictionConfiguration: MoshPredictionConfiguration = MoshPredictionConfiguration(),
     resilience: MoshSessionResilienceConfiguration = MoshSessionResilienceConfiguration(),
-    renderOperationBufferingPolicy: MoshSession.RenderOperationStream.Continuation.BufferingPolicy = .bufferingNewest(512)
+    renderOperationBufferingCapacity: Int = 512
 ) async throws -> MoshSessionFixture {
     let pair = await MoshInMemoryDatagramLink.connectedPair()
     let clock = ManualMillisecondsClock()
@@ -3298,7 +3298,7 @@ private func makeSessionFixture(
             predictionConfiguration: predictionConfiguration,
             resilience: resilience
         ),
-        renderOperationBufferingPolicy: renderOperationBufferingPolicy
+        renderOperationBufferingCapacity: renderOperationBufferingCapacity
     )
     let serverRuntime = try makeServerRuntime(
         link: pair.server,

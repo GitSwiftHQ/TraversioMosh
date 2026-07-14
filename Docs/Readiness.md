@@ -126,18 +126,16 @@ for a re-based diff and carries no resync signal, it is not sufficient for exact
 incremental reconstruction across rebases: consumers needing display fidelity
 must use `renderOperations` (which carries `resync`) or read `screenSnapshot`.
 
-`renderOperations` defaults to a bounded `.bufferingNewest(512)` policy
-(overridable via `MoshSession.init`'s `renderOperationBufferingPolicy`
-parameter). If a slow consumer lets that buffer fill, the session detects the
+`renderOperations` uses a bounded `.bufferingNewest` policy sized by
+`MoshSession.init`'s `renderOperationBufferingCapacity` parameter (default
+512; the type is an `Int` capacity, not a general buffering policy, precisely
+because the repair below only self-heals under `.bufferingNewest`
+semantics). If a slow consumer lets that buffer fill, the session detects the
 resulting dropped operation and emits the same wholesale `.resync(snapshot)`
 used for a re-based diff, rather than silently continuing an incremental
-sequence the consumer never fully received. That repair relies on the default
-`.bufferingNewest` behavior, where a full buffer evicts an older buffered
-operation to accept the newest one; a host that overrides the policy to
-`.bufferingOldest` would have new operations (including the resync itself)
-rejected once full instead, so `.bufferingNewest` is recommended unless a host
-app has a specific reason to keep the oldest backlog instead of the newest
-state.
+sequence the consumer never fully received; a full `.bufferingNewest` buffer
+always accepts the newest yield (including that resync), evicting an older
+buffered operation to make room.
 
 Terminal-generated replies (for example DA/DSR answers to device queries) are
 captured while a diff is applied but are never transmitted. In official Mosh the

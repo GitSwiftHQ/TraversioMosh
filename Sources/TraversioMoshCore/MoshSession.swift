@@ -277,11 +277,23 @@ public actor MoshSession {
     public init(
         configuration: MoshSessionConfiguration,
         hostOperationBufferingPolicy: HostOperationStream.Continuation.BufferingPolicy = .bufferingNewest(512),
-        renderOperationBufferingPolicy: RenderOperationStream.Continuation.BufferingPolicy = .bufferingNewest(512),
+        // Deliberately an `Int` capacity, not a general `BufferingPolicy`: the
+        // backpressure-drop repair below (search `renderStreamOutOfSync`)
+        // detects a full buffer and falls back to a wholesale `.resync`, which
+        // only self-heals under `.bufferingNewest` semantics (a full buffer
+        // still accepts the newest yield, evicting an older one). A
+        // `.bufferingOldest` or zero-capacity policy would reject new yields
+        // — including the resync itself — once full, silently defeating this
+        // guarantee with no enforcement. Restricting the parameter's type
+        // makes that misconfiguration unrepresentable rather than a silent
+        // runtime footgun.
+        renderOperationBufferingCapacity: Int = 512,
         diagnosticEventBufferingPolicy: DiagnosticEventStream.Continuation.BufferingPolicy = .bufferingNewest(512)
     ) {
         let hostOperationStream = Self.makeHostOperationStream(bufferingPolicy: hostOperationBufferingPolicy)
-        let renderOperationStream = Self.makeRenderOperationStream(bufferingPolicy: renderOperationBufferingPolicy)
+        let renderOperationStream = Self.makeRenderOperationStream(
+            bufferingPolicy: .bufferingNewest(renderOperationBufferingCapacity)
+        )
         let diagnosticEventStream = Self.makeDiagnosticEventStream(bufferingPolicy: diagnosticEventBufferingPolicy)
 
         self.configuration = configuration
