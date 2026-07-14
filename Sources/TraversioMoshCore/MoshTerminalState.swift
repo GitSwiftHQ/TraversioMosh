@@ -112,6 +112,18 @@ public struct MoshTerminalHostState: MoshSynchronizedState {
         self.screen.dimensions
     }
 
+    /// Dominated by the framebuffer, the one large peer-controlled payload
+    /// this state holds: `columns * rows` cells at `MoshTerminalCell`'s
+    /// actual stride, which is not the same as its official-Mosh-inherited
+    /// per-dimension cap would suggest (see `MoshTerminalDimensions`). Used
+    /// by `MoshSSPReceiver` to bound the received-state queue's aggregate
+    /// memory, not only its count.
+    public var estimatedByteCount: Int {
+        Int(self.screen.dimensions.columns)
+            * Int(self.screen.dimensions.rows)
+            * MemoryLayout<MoshTerminalCell>.stride
+    }
+
     public var screenSnapshot: MoshTerminalScreenSnapshot {
         self.screen.snapshot
     }

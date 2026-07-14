@@ -243,6 +243,20 @@ struct MoshTerminalStateTests {
         #expect(Int(dimensions.columns) * Int(dimensions.rows) <= MoshTerminalDimensions.maximumCellCount)
     }
 
+    // `MoshSSPReceiver` bounds its received-state queue's aggregate memory
+    // using this value; it must actually track the framebuffer, not report a
+    // constant unrelated to the peer-controlled dimensions.
+    @Test
+    func hostStateEstimatedByteCountScalesWithFramebufferDimensions() throws {
+        let small = MoshTerminalHostState(dimensions: try MoshTerminalDimensions(columns: 80, rows: 24))
+        let large = MoshTerminalHostState(dimensions: try MoshTerminalDimensions(columns: 800, rows: 240))
+
+        #expect(small.estimatedByteCount == 80 * 24 * MemoryLayout<MoshTerminalCell>.stride)
+        #expect(large.estimatedByteCount == 800 * 240 * MemoryLayout<MoshTerminalCell>.stride)
+        // 10x each dimension is 100x the cells, not a constant.
+        #expect(large.estimatedByteCount == small.estimatedByteCount * 100)
+    }
+
     @Test
     func operationDecodingClampsOversizedWireResizeDimensions() throws {
         // A hostile or buggy peer resize of 2^31-1 must not throw (a throw

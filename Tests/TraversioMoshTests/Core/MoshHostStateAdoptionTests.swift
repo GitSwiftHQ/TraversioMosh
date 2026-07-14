@@ -163,6 +163,41 @@ struct MoshHostStateAdoptionTests {
         )
     }
 
+    // Independent of the count ceiling: even well under
+    // `maximumReceivedStateCount`, a peer that keeps every queued state near
+    // its own maximum size can no longer force an unbounded aggregate memory
+    // cost — the aggregate estimated byte budget quenches the queue first.
+    @Test
+    func receiverQueueQuenchesGrowthBeyondCumulativeByteBudget() throws {
+        var receiver = MoshSSPReceiver(initialState: ByteState())
+        let stateByteCount = 20 * 1024 * 1024
+        let cumulativeBudget = MoshSSPReceiver<ByteState>.maximumReceivedStateCumulativeByteCount
+        let statesToFirstExceedBudget = cumulativeBudget / stateByteCount + 2
+        #expect(statesToFirstExceedBudget < MoshSSPReceiver<ByteState>.maximumReceivedStateCount)
+
+        // Admit states 1...statesToFirstExceedBudget (all referencing state 0
+        // so throwaway never prunes them). The state that first pushes the
+        // aggregate estimated byte total past the budget arms the quench
+        // timer but is still admitted, exactly like the count-based cap.
+        for number in 1...statesToFirstExceedBudget {
+            let result = try receiver.receive(
+                byteInstruction(old: 0, new: UInt64(number), diff: Array(repeating: 0, count: stateByteCount)),
+                nowMilliseconds: 0
+            )
+            #expect(result == .accepted(newNumber: UInt64(number)))
+        }
+
+        // The aggregate now exceeds the budget and the quench window is open:
+        // a further state is denied without being acknowledged, even though
+        // the queue holds far fewer than `maximumReceivedStateCount` states —
+        // proving the byte budget, not the count ceiling, is what quenched it.
+        #expect(receiver.stateNumbers.count < MoshSSPReceiver<ByteState>.maximumReceivedStateCount)
+        #expect(
+            try receiver.receive(byteInstruction(old: 0, new: 9_000, diff: [1]), nowMilliseconds: 0)
+                == .queueFull(newNumber: 9_000)
+        )
+    }
+
     private func byteInstruction(old: UInt64, new: UInt64, diff: [UInt8]) -> MoshTransportInstruction {
         MoshTransportInstruction(
             protocolVersion: 2,
@@ -198,5 +233,9 @@ private struct ByteState: MoshSynchronizedState {
         if self.bytes.starts(with: base.bytes) {
             self.bytes.removeFirst(base.bytes.count)
         }
+    }
+
+    var estimatedByteCount: Int {
+        self.bytes.count
     }
 }

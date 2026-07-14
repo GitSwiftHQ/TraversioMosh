@@ -9,6 +9,21 @@ public protocol MoshSynchronizedState: Equatable, Sendable {
     func moshDiff(from base: Self) throws -> [UInt8]
     mutating func applyMoshDiff(_ diff: [UInt8]) throws
     mutating func subtractMoshState(_ base: Self) throws
+    /// Approximate in-memory byte cost of retaining one instance. Used to
+    /// bound the aggregate memory a bounded received-state queue may hold
+    /// (see `MoshSSPReceiver.maximumReceivedStateCumulativeByteCount`) in
+    /// addition to its existing count ceiling, so a peer cannot reach a
+    /// vastly larger aggregate memory cost than that count ceiling was sized
+    /// for by keeping every queued state maximally large. Types with no
+    /// large peer-controlled payload can rely on the default
+    /// `MemoryLayout<Self>.size` implementation below.
+    var estimatedByteCount: Int { get }
+}
+
+extension MoshSynchronizedState {
+    public var estimatedByteCount: Int {
+        MemoryLayout<Self>.size
+    }
 }
 
 public enum MoshSSPError: Error, Equatable, Sendable {
@@ -48,6 +63,19 @@ public struct MoshSSPReceiver<State: MoshSynchronizedState>: Sendable {
     /// Once the queue is full, at most one further state is admitted per this
     /// window, matching official Mosh's `receiver_quench_timer = now + 15000`.
     public static var receiverQuenchIntervalMilliseconds: UInt64 { 15_000 }
+
+    /// Upper bound on the received-state queue's aggregate estimated byte
+    /// cost, independent of `maximumReceivedStateCount`. The count ceiling
+    /// alone assumes official Mosh's own lightweight per-cell representation;
+    /// this package's framebuffer-backed states can individually be far
+    /// larger (see `MoshTerminalDimensions.maximumCellCount`), so a peer that
+    /// keeps every queued state near its own per-state maximum could
+    /// otherwise reach the count ceiling at an aggregate memory cost that
+    /// ceiling was never sized for. 128 MiB is a generous multiple of one
+    /// maximally-sized state — comfortable headroom for legitimate
+    /// reordering bursts of several large states — while remaining a
+    /// mobile-safe aggregate ceiling regardless of how the queue fills.
+    public static var maximumReceivedStateCumulativeByteCount: Int { 128 * 1024 * 1024 }
 
     private var receivedStates: [MoshNumberedState<State>]
     private var acknowledgementNumberStorage: UInt64
@@ -101,11 +129,16 @@ public struct MoshSSPReceiver<State: MoshSynchronizedState>: Sendable {
 
         self.processThrowaway(until: throwawayNumber)
 
-        // Do not accept the state if the queue is full. Official Mosh prefers
-        // this over dropping states from the middle, because it never wants to
-        // ACK a state and then discard it. Once full, one state is admitted per
+        // Do not accept the state if the queue is full by count OR by
+        // aggregate estimated memory. Official Mosh prefers this over
+        // dropping states from the middle, because it never wants to ACK a
+        // state and then discard it. Once full, one state is admitted per
         // quench window; otherwise the new state is dropped and left unacked.
-        if self.receivedStates.count > Self.maximumReceivedStateCount {
+        let isQueueFullByCount = self.receivedStates.count > Self.maximumReceivedStateCount
+        let isQueueFullByBytes = self.receivedStates.reduce(0) { total, numberedState in
+            total + numberedState.state.estimatedByteCount
+        } > Self.maximumReceivedStateCumulativeByteCount
+        if isQueueFullByCount || isQueueFullByBytes {
             if nowMilliseconds < self.receiverQuenchTimerMilliseconds {
                 return .queueFull(newNumber: newNumber)
             }
