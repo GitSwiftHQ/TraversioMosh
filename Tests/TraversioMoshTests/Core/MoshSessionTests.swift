@@ -900,6 +900,24 @@ struct MoshSessionTests {
     }
 
     @Test
+    func renderOperationBufferingCapacityMustBePositive() async {
+        await #expect(processExitsWith: .failure) {
+            let sessionKey = try! MoshSessionKey(rawBytes: sessionKeyBytes)
+            let endpoint = MoshEndpoint(host: "localhost", port: 60_001, sessionKey: sessionKey)
+            _ = MoshSession(
+                configuration: MoshSessionConfiguration(
+                    endpoint: endpoint,
+                    initialTerminalDimensions: try! MoshTerminalDimensions(columns: 80, rows: 24),
+                    transportFactory: RecoverableSendTransportFactory(
+                        link: RecoverableSendDatagramLink(initiallyFailing: false, sendError: .notConnected)
+                    )
+                ),
+                renderOperationBufferingCapacity: 0
+            )
+        }
+    }
+
+    @Test
     func lifecycleRejectsInvalidStartAndStoppedOperations() async throws {
         let fixture = try await makeSessionFixture(columns: 80, rows: 24)
 

@@ -325,6 +325,31 @@ struct MoshFragmentationTests {
         )
         _ = try assembly.add(retransmittedFragment)
     }
+
+    // A literal, end-to-end version of the regression above: the exact same
+    // instruction, fragmented identically under the same instruction ID
+    // (matching a real SSP retransmission after a lost ACK), must decode
+    // successfully a second time rather than being charged as though its
+    // bytes were new on top of the first completion's total.
+    @Test
+    func assemblyCompletesIdenticalRetransmissionOfSameInstructionID() throws {
+        let compressor = MoshCompressor()
+        var assembly = MoshFragmentAssembly(compressor: compressor)
+        let instruction = sampleInstruction(diff: Array(repeating: 0xaa, count: 64))
+        let compressedPayload = try compressor.compress(instruction.serializedBytes())
+        let fragment = try MoshFragment(
+            instructionID: 9,
+            fragmentNumber: 0,
+            isFinal: true,
+            contents: compressedPayload
+        )
+
+        let first = try assembly.add(fragment)
+        #expect(first == instruction)
+
+        let second = try assembly.add(fragment)
+        #expect(second == instruction)
+    }
 }
 
 private func sampleInstruction(
