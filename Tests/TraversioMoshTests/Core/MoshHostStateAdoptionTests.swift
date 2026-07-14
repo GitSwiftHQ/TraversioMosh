@@ -168,34 +168,47 @@ struct MoshHostStateAdoptionTests {
     // its own maximum size can no longer force an unbounded aggregate memory
     // cost — the aggregate estimated byte budget quenches the queue first.
     @Test
-    func receiverQueueQuenchesGrowthBeyondCumulativeByteBudget() throws {
+    func receiverQueueHardRejectsBeyondCumulativeByteBudgetAcrossQuenchWindows() throws {
         var receiver = MoshSSPReceiver(initialState: ByteState())
         let stateByteCount = 20 * 1024 * 1024
         let cumulativeBudget = MoshSSPReceiver<ByteState>.maximumReceivedStateCumulativeByteCount
-        let statesToFirstExceedBudget = cumulativeBudget / stateByteCount + 2
-        #expect(statesToFirstExceedBudget < MoshSSPReceiver<ByteState>.maximumReceivedStateCount)
+        let statesUntilBudgetWouldBeExceeded = cumulativeBudget / stateByteCount
 
-        // Admit states 1...statesToFirstExceedBudget (all referencing state 0
-        // so throwaway never prunes them). The state that first pushes the
-        // aggregate estimated byte total past the budget arms the quench
-        // timer but is still admitted, exactly like the count-based cap.
-        for number in 1...statesToFirstExceedBudget {
+        // Admit states up to (but not past) the aggregate budget: all
+        // referencing state 0 so throwaway never prunes them.
+        for number in 1...statesUntilBudgetWouldBeExceeded {
             let result = try receiver.receive(
                 byteInstruction(old: 0, new: UInt64(number), diff: Array(repeating: 0, count: stateByteCount)),
                 nowMilliseconds: 0
             )
             #expect(result == .accepted(newNumber: UInt64(number)))
         }
-
-        // The aggregate now exceeds the budget and the quench window is open:
-        // a further state is denied without being acknowledged, even though
-        // the queue holds far fewer than `maximumReceivedStateCount` states —
-        // proving the byte budget, not the count ceiling, is what quenched it.
         #expect(receiver.stateNumbers.count < MoshSSPReceiver<ByteState>.maximumReceivedStateCount)
-        #expect(
-            try receiver.receive(byteInstruction(old: 0, new: 9_000, diff: [1]), nowMilliseconds: 0)
-                == .queueFull(newNumber: 9_000)
-        )
+        let stateCountBeforeRejection = receiver.stateNumbers.count
+        let acknowledgedBeforeRejection = receiver.acknowledgementNumber
+
+        // The next state would push the aggregate past the budget. Unlike the
+        // count-based quench, this must be a HARD, permanent rejection — not
+        // merely deferred for one quench window and then let through once.
+        // Probe across several 15s quench windows to prove it never relents:
+        // a byte check that shared the count check's admit-one-per-window
+        // pacing would eventually let the queue creep all the way to the
+        // count ceiling regardless of the byte budget, at up to ~20 GiB of
+        // aggregate memory over enough elapsed windows.
+        for windowIndex in 0..<4 {
+            let nowMilliseconds = UInt64(windowIndex)
+                * MoshSSPReceiver<ByteState>.receiverQuenchIntervalMilliseconds
+            #expect(
+                try receiver.receive(
+                    byteInstruction(old: 0, new: 9_000, diff: Array(repeating: 0, count: stateByteCount)),
+                    nowMilliseconds: nowMilliseconds
+                ) == .queueFull(newNumber: 9_000)
+            )
+        }
+
+        // Rejected across every probed window: never admitted, never acked.
+        #expect(receiver.stateNumbers.count == stateCountBeforeRejection)
+        #expect(receiver.acknowledgementNumber == acknowledgedBeforeRejection)
     }
 
     private func byteInstruction(old: UInt64, new: UInt64, diff: [UInt8]) -> MoshTransportInstruction {

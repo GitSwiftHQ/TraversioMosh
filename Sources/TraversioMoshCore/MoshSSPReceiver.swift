@@ -129,27 +129,48 @@ public struct MoshSSPReceiver<State: MoshSynchronizedState>: Sendable {
 
         self.processThrowaway(until: throwawayNumber)
 
-        // Do not accept the state if the queue is full by count OR by
-        // aggregate estimated memory. Official Mosh prefers this over
-        // dropping states from the middle, because it never wants to ACK a
-        // state and then discard it. Once full, one state is admitted per
-        // quench window; otherwise the new state is dropped and left unacked.
-        let isQueueFullByCount = self.receivedStates.count > Self.maximumReceivedStateCount
-        let isQueueFullByBytes = self.receivedStates.reduce(0) { total, numberedState in
+        // Always apply (even an empty diff) so the built state's `lastApplied*`
+        // metadata reflects exactly this diff and never a stale copy from the
+        // reference state (an empty-diff heartbeat still advances the number).
+        // Built before either admission check below so the byte budget can
+        // measure the CANDIDATE's own cost, not only the states already queued.
+        var newState = referenceState.state
+        try newState.applyMoshDiff(instruction.diff ?? [])
+
+        // The byte budget is a hard memory ceiling, not a pacing mechanism.
+        // Unlike the count-based quench below — which faithfully mirrors
+        // official Mosh's own admit-one-per-window behavior, safe there only
+        // because its per-state cost is tiny — periodically admitting one more
+        // state despite already being over budget would let this package's far
+        // heavier framebuffer-backed states keep creeping the aggregate upward
+        // indefinitely, defeating the ceiling entirely over enough quench
+        // windows. So this check includes the candidate state's own cost and
+        // rejects unconditionally whenever admitting it would cross the
+        // budget: no timer, no periodic grace. It recomputes fresh on every
+        // call against the queue as `processThrowaway` above just left it, so
+        // admission resumes as soon as enough room is freed. A rejected state
+        // is dropped before insertion, so it is never acknowledged.
+        let projectedByteCount = self.receivedStates.reduce(newState.estimatedByteCount) { total, numberedState in
             total + numberedState.state.estimatedByteCount
-        } > Self.maximumReceivedStateCumulativeByteCount
-        if isQueueFullByCount || isQueueFullByBytes {
+        }
+        guard projectedByteCount <= Self.maximumReceivedStateCumulativeByteCount else {
+            return .queueFull(newNumber: newNumber)
+        }
+
+        // Do not accept the state if the queue is full by count. Official Mosh
+        // prefers this over dropping states from the middle, because it never
+        // wants to ACK a state and then discard it. Once full, one state is
+        // admitted per quench window; otherwise the new state is dropped and
+        // left unacked. Safe as a periodic-admission (not hard-reject) policy
+        // specifically because official Mosh's own per-state cost is small; see
+        // the byte budget above for why that same leniency would be unsafe if
+        // applied to aggregate memory.
+        if self.receivedStates.count > Self.maximumReceivedStateCount {
             if nowMilliseconds < self.receiverQuenchTimerMilliseconds {
                 return .queueFull(newNumber: newNumber)
             }
             self.receiverQuenchTimerMilliseconds = nowMilliseconds &+ Self.receiverQuenchIntervalMilliseconds
         }
-
-        // Always apply (even an empty diff) so the built state's `lastApplied*`
-        // metadata reflects exactly this diff and never a stale copy from the
-        // reference state (an empty-diff heartbeat still advances the number).
-        var newState = referenceState.state
-        try newState.applyMoshDiff(instruction.diff ?? [])
 
         let numberedState = MoshNumberedState(number: newNumber, state: newState)
         self.insertReceivedState(numberedState)
