@@ -126,6 +126,19 @@ for a re-based diff and carries no resync signal, it is not sufficient for exact
 incremental reconstruction across rebases: consumers needing display fidelity
 must use `renderOperations` (which carries `resync`) or read `screenSnapshot`.
 
+`renderOperations` defaults to a bounded `.bufferingNewest(512)` policy
+(overridable via `MoshSession.init`'s `renderOperationBufferingPolicy`
+parameter). If a slow consumer lets that buffer fill, the session detects the
+resulting dropped operation and emits the same wholesale `.resync(snapshot)`
+used for a re-based diff, rather than silently continuing an incremental
+sequence the consumer never fully received. That repair relies on the default
+`.bufferingNewest` behavior, where a full buffer evicts an older buffered
+operation to accept the newest one; a host that overrides the policy to
+`.bufferingOldest` would have new operations (including the resync itself)
+rejected once full instead, so `.bufferingNewest` is recommended unless a host
+app has a specific reason to keep the oldest backlog instead of the newest
+state.
+
 Terminal-generated replies (for example DA/DSR answers to device queries) are
 captured while a diff is applied but are never transmitted. In official Mosh the
 server-side emulator answers such queries; a client that echoed them back would
@@ -213,6 +226,23 @@ The default outbound fragment budget
 chosen to keep encrypted datagrams within a conservative path MTU. Override it
 via `MoshSessionConfiguration.maximumSerializedFragmentByteCount` only when the
 host app has a proven reason.
+
+Inbound fragment reassembly (`MoshFragmentAssembly`) bounds the cumulative
+compressed bytes it will retain for one in-flight instruction to
+`MoshFragmentAssembly.maximumCumulativeCompressedByteCount`, checked before
+every fragment is stored rather than only after the final fragment arrives.
+This is `MoshCompressor.defaultMaximumOutputByteCount` plus zlib's own
+worst-case compressed-expansion margin, so a legitimate peer's instruction can
+never be rejected by it regardless of how incompressible its content is.
+
+Terminal dimensions from a peer resize are bounded on two axes:
+`MoshTerminalDimensions.maximumDimension` (2048) per axis, and
+`MoshTerminalDimensions.maximumCellCount` (250,000) on the product of both,
+so two dimensions that each individually pass the per-axis cap cannot still
+reach an oversized combined allocation. Oversized requests clamp — shrinking
+whichever dimension is larger while preserving the smaller one — rather than
+rejecting, since a resize that threw would tear down an otherwise healthy
+session.
 
 ## Key Handling
 
