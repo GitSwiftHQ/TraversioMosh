@@ -18,19 +18,32 @@ public struct MoshTerminalDimensions: Equatable, Sendable {
     /// `resize` (e.g. `Int32.max` columns) forces an OOM-scale allocation. 2048
     /// matches official mosh's effective per-dimension bound (its
     /// terminal-to-host transport buffer is sized 2048 * 2048;
-    /// `Framebuffer::resize` itself has no per-dimension cap) and bounds the
-    /// grid to at most 4_194_304 cells. Oversized values are clamped, not
-    /// rejected: a resize arrives over the wire mid-session, and throwing there
-    /// tears down an otherwise healthy connection that official mosh would
-    /// keep serving.
+    /// `Framebuffer::resize` itself has no per-dimension cap). Official mosh's
+    /// `Cell` is only a few bytes; `MoshTerminalCell` is not, so 2048 x 2048
+    /// independently-clamped dimensions still let a peer reach the combined
+    /// `maximumCellCount` ceiling below. This bound alone does not prevent that.
     public static let maximumDimension: Int32 = 2048
+
+    /// Upper bound on total cells (`columns * rows`), independent of either
+    /// dimension. `MemoryLayout<MoshTerminalCell>.stride` is about 80 bytes on
+    /// Apple platforms (a `String`, an optional hyperlink, a text-attributes
+    /// struct, and bookkeeping fields), so 2048 x 2048 alone permits a
+    /// ~320 MiB single allocation — and `MoshTerminalScreen.resize(_:)` briefly
+    /// holds the old grid alive alongside the new one, roughly doubling that
+    /// peak. 250,000 cells is about 20 MiB per grid at that stride: generous
+    /// headroom over any real terminal (80x24 is 1,920 cells; even an extreme
+    /// multi-pane layout is unlikely to exceed a few hundred thousand) while
+    /// keeping worst-case resize memory mobile-safe regardless of how the
+    /// two dimensions are split. Oversized values are clamped, not rejected,
+    /// matching `maximumDimension`'s clamp-not-reject rationale above.
+    public static let maximumCellCount = 250_000
 
     public let columns: Int32
     public let rows: Int32
 
     public init(columns: Int32, rows: Int32) throws {
         // Nonpositive dimensions stay rejected (official mosh asserts
-        // `s_width > 0 && s_height > 0`); only the upper bound clamps.
+        // `s_width > 0 && s_height > 0`); only the upper bounds clamp.
         guard columns > 0 else {
             throw MoshTerminalOperationError.invalidColumnCount(columns)
         }
@@ -38,8 +51,29 @@ public struct MoshTerminalDimensions: Equatable, Sendable {
             throw MoshTerminalOperationError.invalidRowCount(rows)
         }
 
-        self.columns = min(columns, Self.maximumDimension)
-        self.rows = min(rows, Self.maximumDimension)
+        let clampedColumns = min(columns, Self.maximumDimension)
+        let clampedRows = min(rows, Self.maximumDimension)
+
+        guard Int(clampedColumns) * Int(clampedRows) > Self.maximumCellCount else {
+            self.columns = clampedColumns
+            self.rows = clampedRows
+            return
+        }
+
+        // Both dimensions already fit individually but their product does not:
+        // shrink whichever is larger so the total stays within budget, keeping
+        // the smaller (usually the more meaningful) dimension untouched. The
+        // divisor is always positive and no larger than `maximumDimension`, and
+        // the branch only runs when the current product exceeds
+        // `maximumCellCount`, so the recomputed dimension is always smaller
+        // than its current (already-clamped) value and always at least 1.
+        if clampedColumns >= clampedRows {
+            self.rows = clampedRows
+            self.columns = Int32(Self.maximumCellCount / Int(clampedRows))
+        } else {
+            self.columns = clampedColumns
+            self.rows = Int32(Self.maximumCellCount / Int(clampedColumns))
+        }
     }
 
     public init(wireSize: MoshTerminalSize) throws {

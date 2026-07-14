@@ -189,23 +189,58 @@ struct MoshTerminalStateTests {
 
     @Test
     func dimensionsClampValuesAboveMaximum() throws {
-        // Values within the cap pass through unchanged; oversized values clamp
-        // to the cap instead of throwing, because a wire resize that throws
-        // tears down the whole session.
-        let within = try MoshTerminalDimensions(columns: 1500, rows: 400)
-        #expect(within.columns == 1500)
-        #expect(within.rows == 400)
+        // Values within both the per-dimension cap and the combined
+        // cell-count budget pass through unchanged; oversized values clamp
+        // instead of throwing, because a wire resize that throws tears down
+        // the whole session.
+        let within = try MoshTerminalDimensions(columns: 300, rows: 100)
+        #expect(within.columns == 300)
+        #expect(within.rows == 100)
+
+        let expectedClampedDimension = Int32(
+            MoshTerminalDimensions.maximumCellCount / Int(MoshTerminalDimensions.maximumDimension)
+        )
 
         let atCap = try MoshTerminalDimensions(
             columns: MoshTerminalDimensions.maximumDimension,
             rows: MoshTerminalDimensions.maximumDimension
         )
-        #expect(atCap.columns == MoshTerminalDimensions.maximumDimension)
+        // Both dimensions are individually at the per-dimension cap, but their
+        // product (4,194,304) exceeds `maximumCellCount`, so one dimension
+        // (tied here, so columns) shrinks to bring the total into budget while
+        // the other is preserved.
         #expect(atCap.rows == MoshTerminalDimensions.maximumDimension)
+        #expect(atCap.columns == expectedClampedDimension)
+        #expect(Int(atCap.columns) * Int(atCap.rows) <= MoshTerminalDimensions.maximumCellCount)
 
         let oversized = try MoshTerminalDimensions(columns: 5000, rows: 5000)
-        #expect(oversized.columns == MoshTerminalDimensions.maximumDimension)
         #expect(oversized.rows == MoshTerminalDimensions.maximumDimension)
+        #expect(oversized.columns == expectedClampedDimension)
+    }
+
+    @Test
+    func dimensionsClampCombinedCellCountEvenWhenEachDimensionIsIndividuallyWithinBounds() throws {
+        // Finding: independent per-dimension clamping alone is insufficient —
+        // two dimensions can each pass the per-dimension cap while their
+        // product still reaches OOM-scale allocation. 2000 x 2000 is under
+        // `maximumDimension` (2048) on both axes, but its product (4,000,000)
+        // is far beyond `maximumCellCount`.
+        let dimensions = try MoshTerminalDimensions(columns: 2000, rows: 2000)
+
+        #expect(dimensions.columns < 2000)
+        #expect(dimensions.rows == 2000)
+        #expect(Int(dimensions.columns) * Int(dimensions.rows) <= MoshTerminalDimensions.maximumCellCount)
+    }
+
+    @Test
+    func dimensionsClampPreservesTheSmallerDimensionWhenShrinkingForCombinedBudget() throws {
+        // The asymmetric case: the smaller dimension (columns) is preserved
+        // and the larger one (rows) is the one shrunk.
+        let dimensions = try MoshTerminalDimensions(columns: 200, rows: 2040)
+
+        #expect(dimensions.columns == 200)
+        #expect(dimensions.rows == 1250)
+        #expect(Int(dimensions.columns) * Int(dimensions.rows) <= MoshTerminalDimensions.maximumCellCount)
     }
 
     @Test
@@ -229,15 +264,17 @@ struct MoshTerminalStateTests {
 
     @Test
     func operationDecodingAcceptsLargeButRealisticWireResize() throws {
-        // Regression: a 1500x400 resize used to work, then a 1000-cap rejected
-        // it and killed the session. It must decode to exactly 1500x400.
+        // Regression: a large, asymmetric resize used to work, then an
+        // overly aggressive cap rejected it and killed the session. 1000x200
+        // (200,000 cells) is comfortably under `maximumCellCount` and must
+        // decode unchanged.
         let hostMessage = MoshHostMessage(instructions: [
-            MoshHostInstruction(resize: MoshTerminalSize(columns: 1500, rows: 400)),
+            MoshHostInstruction(resize: MoshTerminalSize(columns: 1000, rows: 200)),
         ])
 
         let operations = try MoshHostOperation.operations(from: hostMessage)
 
-        #expect(operations == [.resize(try MoshTerminalDimensions(columns: 1500, rows: 400))])
+        #expect(operations == [.resize(try MoshTerminalDimensions(columns: 1000, rows: 200))])
     }
 
     @Test
