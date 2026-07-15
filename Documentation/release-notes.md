@@ -11,7 +11,7 @@ See LICENSE for details.
 
 No user-visible changes yet.
 
-## 1.0.0 - 2026-07-14
+## 1.0.0 - 2026-07-15
 
 Initial public release of the TraversioMosh client data plane for Apple
 platforms.
